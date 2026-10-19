@@ -1,0 +1,7 @@
+mediapipe==1.1.1
+opencv-python==5.0.0.93
+pyautogui==0.9.54
+winrt-runtime==3.2.1
+winrt-Windows.Foundation==3.2.1
+winrt-Windows.Foundation.Collections==3.2.1
+winrt-Windows.UI.Input.Inking==3.2.1
