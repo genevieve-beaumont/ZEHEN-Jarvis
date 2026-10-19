@@ -8,9 +8,9 @@ Laptop camera &nbsp;·&nbsp; No extra hardware &nbsp;·&nbsp; Fully offline
 
 <br>
 
-<a href="docs/media/zehen-demo.mp4"><img src="docs/media/zehen-demo.gif" alt="ZEHEN demo" width="100%"></a>
+<a href="https://priyanshusta.github.io/ZEHEN/#demo"><img src="docs/media/zehen-demo.gif" alt="ZEHEN demo" width="100%"></a>
 
-<sub>Live desktop, real ZEHEN interface. Hand motion scripted for the recording. &nbsp;<a href="docs/media/zehen-demo.mp4">Watch in full quality →</a></sub>
+<sub>Live desktop, real ZEHEN interface. Hand motion scripted for the recording. &nbsp;<a href="https://priyanshusta.github.io/ZEHEN/#demo">Watch the full video →</a></sub>
 
 <br><br>
 
