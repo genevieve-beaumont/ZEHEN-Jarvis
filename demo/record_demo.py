@@ -117,6 +117,9 @@ def card(root, W, H, lines):
 
 
 def notepad_window():
+    front = zehen.u32.GetForegroundWindow()
+    if front and zehen.window_text(front, "GetClassNameW") == "Notepad":
+        return front
     for h, title in zehen.list_windows():
         if zehen.window_text(h, "GetClassNameW") == "Notepad":
             return h
@@ -152,8 +155,9 @@ def main():
             now = time.monotonic()
             ptr = (ptr[0] + 0.0018 * math.sin(now * 11.3) + 0.0012 * math.sin(now * 17.9),
                    ptr[1] + 0.0018 * math.sin(now * 13.7 + 1) + 0.0012 * math.sin(now * 7.1))
-            if not t.mode and not zoom and g in ("point", "pinch"):  # like ZEHEN: the real cursor follows
-                zehen.pyautogui.moveTo(int(ptr[0] * W), int(ptr[1] * H))
+            # the real cursor sits under the ring every frame, so a recorder that draws its own cursor
+            # (WinScreen Studio does) shows it exactly where ZEHEN's ring is
+            zehen.pyautogui.moveTo(int(ptr[0] * W), int(ptr[1] * H))
         if hands is None:
             hands = [hand_at(ptr, g)] if ptr else []
         t.ui = t._layout()
@@ -271,6 +275,9 @@ def main():
         yield from tap("Notepad", tile("Notepad", "APPS"), "APPS")             # really opens Notepad
         yield from wait_foreground(lambda title, cls: cls == "Notepad", at=(0.3, 0.35))
         notepad["hwnd"] = notepad_window()
+        for h, _ in zehen.list_windows():  # Notepad may restore extra windows from last time: tuck them away
+            if zehen.window_text(h, "GetClassNameW") == "Notepad" and int(h) != int(notepad["hwnd"] or 0):
+                zehen.u32.ShowWindow(h, 6)  # SW_MINIMIZE (nothing is closed)
         if notepad["hwnd"]:
             zehen.u32.ShowWindow(notepad["hwnd"], 9)  # restore, then sit below the writing pad
             user32.MoveWindow(notepad["hwnd"], int(0.24 * W), int(0.705 * H), int(0.52 * W), int(0.24 * H), True)
@@ -348,11 +355,20 @@ def main():
         yield from hold(3.0)
         outro.destroy()
 
+    # --keep-windows: another recorder (e.g. WinScreen Studio) is running; don't minimize its controls
+    tidy = "--keep-windows" not in sys.argv
     zehen.pyautogui.moveTo(W // 2, H // 3)  # off the taskbar: no window previews popping up
-    zehen.pyautogui.hotkey("win", "m")      # minimize everything: a clean desktop that stays clean
-                                            # (Win+D brings windows back as soon as a new one appears)
-    time.sleep(3.0)                         # let the minimize animations finish before recording
-    recorder = Recorder(OUT / "zehen-demo.mp4", (0, 0, W, H))
+    if tidy:
+        zehen.pyautogui.hotkey("win", "m")  # minimize everything: a clean desktop that stays clean
+        time.sleep(3.0)                     # (Win+D would bring windows back as soon as one appears)
+        tucked = []
+    else:  # minimize every window except the recorder's own controls
+        tucked = [h for h, title in zehen.list_windows() if title != "WinScreen Recorder"]
+        for h in tucked:
+            zehen.u32.ShowWindow(h, 6)
+        time.sleep(2.0)
+    # --no-record: another app (e.g. WinScreen Studio) is recording; just perform the demo
+    recorder = None if "--no-record" in sys.argv else Recorder(OUT / "zehen-demo.mp4", (0, 0, W, H))
     steps = script()
 
     def step():
@@ -360,15 +376,20 @@ def main():
             next(steps)
             root.after(int(1000 / FPS), step)
         except StopIteration:
-            recorder.stop()
+            if recorder:
+                recorder.stop()
             root.destroy()
 
     root.after(500, step)
     root.mainloop()
-    zehen.pyautogui.hotkey("win", "shift", "m")  # give you your windows back
-    make_gif(OUT / "zehen-demo.mp4", OUT / "zehen-demo.gif")
-    for f in ("zehen-demo.mp4", "zehen-demo.gif"):
-        print(f, f"{(OUT / f).stat().st_size / 1e6:.1f} MB")
+    if tidy:
+        zehen.pyautogui.hotkey("win", "shift", "m")  # give you your windows back
+    for h in tucked:
+        zehen.u32.ShowWindow(h, 9)  # SW_RESTORE
+    if recorder:
+        make_gif(OUT / "zehen-demo.mp4", OUT / "zehen-demo.gif")
+        for f in ("zehen-demo.mp4", "zehen-demo.gif"):
+            print(f, f"{(OUT / f).stat().st_size / 1e6:.1f} MB")
 
 
 if __name__ == "__main__":
