@@ -33,7 +33,7 @@ from PIL import ImageGrab  # noqa: E402
 FPS = 30            # animation steps per second (motion itself follows the real clock)
 VIDEO_FPS = 15      # recorded frames per second
 OUT = ROOT / "docs" / "media"
-GIF_WIDTH, GIF_FPS = 760, 12
+GIF_WIDTH, GIF_FPS = 640, 8  # README GIF: ~2.5 MB, so it shows up fast on GitHub
 POSES = {"point": (0, 1, 0, 0, 0), "palm": (1, 1, 1, 1, 1), "three": (0, 1, 1, 1, 0), "scroll": (0, 1, 1, 0, 0)}
 user32 = ctypes.WinDLL("user32")
 user32.MoveWindow.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.BOOL]
@@ -96,7 +96,7 @@ class Recorder:
 def make_gif(mp4, gif):
     """One shared palette tuned to the cyan HUD; only changed rectangles are stored per frame."""
     vf = (f"fps={GIF_FPS},scale={GIF_WIDTH}:-1:flags=lanczos,split[a][b];"
-          "[a]palettegen=max_colors=96:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle")
+          "[a]palettegen=max_colors=48:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle")
     subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-i", str(mp4), "-vf", vf,
                     str(gif)], check=True)
 
