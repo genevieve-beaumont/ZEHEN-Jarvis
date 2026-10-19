@@ -561,7 +561,8 @@ class Tracker:
             self._type(gap + best)
 
     def _type(self, text):
-        pyautogui.write(text)  # ponytail: ASCII only; non-English text needs clipboard paste
+        # a small gap per key: at full speed Notepad dropped letters ("look ma" arrived as "look a")
+        pyautogui.write(text, interval=0.015)  # ponytail: ASCII only; non-English text needs clipboard paste
         self.chunks.append(text)
 
     def _use_alt(self, alt):
