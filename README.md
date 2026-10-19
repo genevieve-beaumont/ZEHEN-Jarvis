@@ -1,50 +1,37 @@
 <div align="center">
 
-# ◉ ZEHEN
+# ZEHEN
 
-### Your hand is the mouse.
+**The computer, operated by hand.**
 
-Control Windows with hand gestures through your laptop camera.<br>
-Point, pinch, scroll, zoom, launch apps and **write in the air**. No gloves, no extra hardware, nothing leaves your PC.
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-00e5ff?style=for-the-badge&labelColor=08121a)](LICENSE)
-[![Windows 10 | 11](https://img.shields.io/badge/Windows-10%20%7C%2011-00e5ff?style=for-the-badge&logo=windows&logoColor=00e5ff&labelColor=08121a)](#-quick-start)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-00e5ff?style=for-the-badge&logo=python&logoColor=00e5ff&labelColor=08121a)](requirements.txt)
-[![Runs offline](https://img.shields.io/badge/Runs-100%25%20offline-3dff9a?style=for-the-badge&labelColor=08121a)](SECURITY.md)
+Laptop camera &nbsp;·&nbsp; No extra hardware &nbsp;·&nbsp; Fully offline
 
 <br>
 
-<img src="docs/media/zehen-demo.gif" alt="ZEHEN demo: the launcher opens Notepad, 'Hey' is written in the air and typed, YouTube is scrolled and zoomed with hand gestures" width="100%">
+<a href="docs/media/zehen-demo.mp4"><img src="docs/media/zehen-demo.gif" alt="ZEHEN demo" width="100%"></a>
 
-<sub>Recorded on a live Windows desktop with the real ZEHEN app: real launcher, real handwriting recognition, real typing, scrolling and zoom. Only the hand motion is scripted for the recording. <a href="docs/media/zehen-demo.mp4">Full-quality video ▸</a></sub>
+<sub>Live desktop, real ZEHEN interface. Hand motion scripted for the recording. &nbsp;<a href="docs/media/zehen-demo.mp4">Watch in full quality →</a></sub>
 
 <br><br>
 
-**[Quick start](#-quick-start)** · **[Gestures](#-gestures)** · **[How it works](#-how-it-works)** · **[Roadmap](ROADMAP.md)** · **[Website](docs/index.html)** · **[Contributing](CONTRIBUTING.md)**
+[Website](https://priyanshusta.github.io/ZEHEN/) &nbsp;&nbsp;·&nbsp;&nbsp; [Install](#install) &nbsp;&nbsp;·&nbsp;&nbsp; [Gestures](#gestures) &nbsp;&nbsp;·&nbsp;&nbsp; [Roadmap](ROADMAP.md) &nbsp;&nbsp;·&nbsp;&nbsp; [Contributing](CONTRIBUTING.md)
 
 </div>
 
----
+<br>
 
-## ✨ Why ZEHEN
+## Overview
 
-In the movies, people move holograms with their hands. ZEHEN brings the first real piece of that to the
-laptop you already own. Raise your hand and a glowing cursor ring appears; pinch to click, hold an open
-palm to summon a launcher, write a word in the air and watch it get typed.
+ZEHEN turns an ordinary webcam into a precision input device. It tracks 21 points on each hand, reads
+gestures in real time, and drives Windows directly: cursor, clicks, scrolling, zoom, app switching,
+an app launcher, and handwriting typed from the air.
 
-| | |
-|---|---|
-| 🎥 **Invisible camera** | Tracking runs in the background. A see-through HUD shows a glowing cursor ring and what you're doing. |
-| ✍️ **Air-writing** | Pinch and write in the air. Windows' offline handwriting recognition types it into any app, with "did you mean" fixes. |
-| 🚀 **Launcher** | Hold an open palm: your open windows, favourite apps, a search across every installed app, and system controls. |
-| 🙌 **Two hands** | Stretch both hands to zoom like a photo. Swipe your other hand to flick between apps. |
-| 🎯 **Steady and precise** | One Euro smoothing, debounced gestures and click-lock make a hand feel as accurate as a touchpad. |
-| 🧭 **Learns with you** | A guided tutorial on first run, a live wireframe of your hands, and a gesture guide that lights up as you move. |
-| 🔒 **Private by design** | Video is analysed in memory and dropped. Hand tracking and handwriting both run offline. |
+There is nothing to wear and nothing to install beyond Python. The camera is never shown, and no frame
+ever leaves the machine.
 
-## 🚀 Quick start
+## Install
 
-Needs **Windows 10/11** and **Python 3.10+** ([python.org](https://www.python.org/downloads/)).
+Windows 10 or 11, Python 3.10+.
 
 ```bash
 git clone https://github.com/priyanshusta/ZEHEN.git
@@ -52,142 +39,106 @@ cd ZEHEN
 .\ZEHEN.bat
 ```
 
-`ZEHEN.bat` finds Python even if it isn't on your PATH, installs the libraries on first run, and starts
-ZEHEN without a console window. The first time, ZEHEN asks for camera permission and walks you through
-every gesture. Replay the tutorial any time with **tutorial ↻** on the panel.
+`ZEHEN.bat` locates Python, installs dependencies on first run, and starts ZEHEN in the background.
+A short guided tutorial runs the first time.
 
-<details>
-<summary>Prefer the terminal?</summary>
+## Gestures
 
-```bash
-python -m pip install -r requirements.txt
-python zehen.py
-```
-</details>
-
-## 🖐 Gestures
-
-| Gesture | What it does |
+| Gesture | Action |
 |---|---|
-| ☝️ **Index finger up** | Move the cursor |
-| 🤏 **Pinch** thumb + index | Click. Hold and move to drag |
-| 🤏🤏 **Pinch twice quickly** | Open: a double-click on apps, files and folders |
-| 👌 **Index up, thumb to middle finger** | Right-click |
-| ✌️ **Two fingers up** | Scroll: raise your hand to go up, lower it to go down |
-| 🖐️ **Open palm, hold** | Launcher. Hold again to close any panel |
-| ✍️ **Three fingers up, hold** | Writing pad |
-| 🙌 **Both hands pinch, then stretch** | Zoom in / out |
-| 👋 **Swipe your other hand** | Switch to your last app |
-| ✊ **Fist** | Pause |
+| Index finger up | Move cursor |
+| Pinch, thumb and index | Click. Hold to drag |
+| Pinch twice | Open |
+| Index up, thumb to middle | Right-click |
+| Two fingers up | Scroll |
+| Open palm, hold | Launcher |
+| Three fingers, hold | Writing pad |
+| Both hands pinch, stretch | Zoom |
+| Other hand swipes | Switch app |
+| Fist | Pause |
 
-Your right hand drives the cursor and your left hand gives commands. With one hand up, either hand
-works. Touch the real mouse or touchpad and ZEHEN lets go of the cursor for a moment.
+The right hand drives the cursor; the left issues commands. Either hand works alone. Touching the real
+mouse hands control back instantly.
 
-### 🚀 Launcher
+## Capabilities
 
-Hold an open palm, point at a tile and pinch to tap it.
+**Launcher.** Open windows, favourite apps, search across every installed app, and system controls,
+all one pinch away.
 
-- **Open windows**: jump straight to any window
-- **Apps**: your favourites, plus **Search all apps**: write an app's name in the air, then tap the match
-- **Controls**: keyboard, writing pad, files, desktop, task view, screenshot, maximize, minimize,
-  close window, volume, play / pause
+**Writing pad.** Write in the air. Windows' on-device handwriting recognition converts the ink and
+types it into the active app, with alternatives for every word.
 
-### ✍️ Writing pad
+**Precision.** One Euro filtering, debounced gestures, scale-invariant pinch detection, and click
+locking make hand input as accurate as a touchpad.
 
-Pinch and write in the box; pause for a second and the ink turns into typed text in the app you were
-using. Buttons: **⌫** letter, **⌫ word**, **space**, **enter**, **clear ink**, **close**. If a word
-comes out wrong, tap one of the "did you mean" chips.
+**Awareness.** A transparent HUD shows the cursor, the active gesture, and a live wireframe of your
+hands. It never takes focus away from the app you are using.
 
-## 🧠 How it works
+## Architecture
 
 ```mermaid
 flowchart LR
-    A[📷 Camera frame] -->|mirrored, in memory| B[MediaPipe<br>21 points × 2 hands]
-    B --> C[Gesture engine<br>poses · pinch · debounce]
-    C --> D[One Euro filter<br>steady cursor]
-    D --> E{Action}
-    E --> F[🖱 Mouse · wheel · keys]
-    E --> G[🚀 Launcher / ✍️ Pad]
-    G -->|ink| H[Windows handwriting<br>recognition] --> F
-    C --> I[✨ HUD overlay<br>cursor ring · guide panel]
+    A[Camera] --> B[MediaPipe<br>21 landmarks × 2 hands]
+    B --> C[Gesture engine]
+    C --> D[One Euro filter]
+    D --> E[Mouse · wheel · keys]
+    C --> F[Launcher · writing pad]
+    F --> G[Windows ink recognition] --> E
+    C --> H[HUD overlay]
 ```
 
-- **See**: each camera frame is mirrored and handed to MediaPipe, never stored or shown.
-- **Track**: 21 landmarks per hand, both hands, every frame, on-device.
-- **Understand**: finger poses and pinch distance (scaled to your hand size, so near or far both work),
-  held for a few frames before they count.
-- **Act**: real mouse, wheel and keystrokes, plus the HUD so you always see what happened.
+One file, [`zehen.py`](zehen.py). Tracking runs on a background thread and publishes a snapshot each
+frame; the HUD only renders it. Every value that affects feel is a documented constant at the top.
 
-## ⚙️ Settings
+## Configuration
 
-Everything that changes how ZEHEN *feels* (smoothing, pinch sensitivity, hold time, scroll speed,
-double-pinch timing) is a commented knob at the top of [`zehen.py`](zehen.py).
+`%USERPROFILE%\.zehen.json`
 
-Personal settings live in `%USERPROFILE%\.zehen.json`:
-
-| Key | Example | Meaning |
+| Key | Default | Purpose |
 |---|---|---|
-| `main_hand` | `"Left"` | Which hand drives the cursor (default `"Right"`) |
-| `apps` | `["Spotify", "Notepad"]` | Favourite apps in the launcher, by Start menu name |
-| `camera` | `1` | Camera ZEHEN found last time (it searches again if this one stops working) |
-| `tutorial_done` | `false` | Show the tutorial again on next start |
+| `main_hand` | `"Right"` | Hand that drives the cursor |
+| `apps` | built-in list | Launcher favourites, by Start menu name |
+| `camera` | auto | Camera index; ZEHEN skips virtual cameras and finds a live one |
+| `tutorial_done` | `false` | Set to `false` to see the tutorial again |
 
-## 🛠 Troubleshooting
+## Privacy
 
-| Problem | Fix |
-|---|---|
-| "Can't reach the camera" | Close other apps using it. Turn on Windows Settings › Privacy & security › Camera › *Let desktop apps access your camera*. Check for a lens shutter or camera F-key. |
-| A black / frozen camera | Virtual cameras (PRISM Lens, OBS) are skipped automatically; ZEHEN picks the first camera with a live picture. |
-| Cursor shaky or laggy | Lower `MIN_CUTOFF` for steadier, raise `BETA` for snappier. |
-| Clicks fire too easily | Lower `PINCH_ON`. Not easily enough? Raise it. |
-| `python` not recognized | Use `ZEHEN.bat`, it finds Python for you. |
+Frames are processed in memory and discarded. Hand tracking and handwriting recognition run on-device.
+No accounts, no telemetry, no network calls beyond a one-time model download. Details in
+[SECURITY.md](SECURITY.md).
 
-Run the self-test any time: `python zehen.py --test`. It checks gesture detection, smoothing, app
-search, every panel's layout, real handwriting recognition and the hand model.
+## Roadmap
 
-## 🛰 Roadmap
-
-| Version | Theme | Highlights |
+| | Release | Focus |
 |---|---|---|
-| ✅ **Mark I** | Your hand is the mouse | Cursor, clicks, scroll, two-hand zoom, launcher, air-writing, tutorial |
-| 🔭 **Mark II** | Feel it | Calibration wizard, custom gestures, sound feedback, multi-monitor, installer |
-| 🔭 **J.A.R.V.I.S.** | Talk to it | Wake word, offline voice, "point at a window and say maximize" |
-| 🧪 **Holo-table** | Grab the interface | Throw windows between screens, rotate 3D models, push to press |
-| 🧪 **Stark** | Beyond the screen | AR glasses, eye + hand targeting, smart home, plugin API |
+| ● | **Mark I** | Cursor, gestures, two-hand zoom, launcher, air-writing. *Shipped.* |
+| ○ | **Mark II** | Calibration, custom gestures, multi-monitor, installer |
+| ○ | **J.A.R.V.I.S.** | Offline voice. Point at a window and speak |
+| ○ | **Holo-table** | Throw windows between screens, manipulate 3D objects |
+| ○ | **Stark** | AR glasses, gaze plus hand, plugin API |
 
-The full plan, with every idea, is in **[ROADMAP.md](ROADMAP.md)**. Seen a gesture in a movie you want?
-[Suggest it](../../issues/new?template=feature_request.md).
+Full plan: [ROADMAP.md](ROADMAP.md).
 
-## 📁 Project layout
+## Verify
 
-| Path | What |
-|---|---|
-| [`ZEHEN.bat`](ZEHEN.bat) | Double-click launcher |
-| [`zehen.py`](zehen.py) | The whole app: tracking, gestures, HUD, launcher, writing pad, self-test |
-| [`hand_landmarker.task`](hand_landmarker.task) | MediaPipe hand model (re-downloaded automatically if missing) |
-| [`demo/`](demo) | Records the demo video on your desktop: `python demo/record_demo.py` |
-| [`docs/`](docs) | Project website and demo media |
-| [`build.bat`](build.bat) | Optional: builds a standalone `dist\ZEHEN.exe` |
+```bash
+python zehen.py --test
+```
 
-## 🤝 Contributing
+Covers gesture classification, filtering, app search, every panel layout, handwriting recognition and
+model loading. To re-record the demo: `python demo/record_demo.py`.
 
-Ideas, bug reports and pull requests are all welcome. Start with **[CONTRIBUTING.md](CONTRIBUTING.md)**,
-and please follow the **[Code of Conduct](CODE_OF_CONDUCT.md)**. Found a privacy or security issue? See
-**[SECURITY.md](SECURITY.md)**. Changes are tracked in **[CHANGELOG.md](CHANGELOG.md)**.
+## Contributing
 
-## 🏆 Credits
+Issues and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[Code of Conduct](CODE_OF_CONDUCT.md) first. Release notes live in [CHANGELOG.md](CHANGELOG.md).
 
-| | |
-|---|---|
-| <img src="https://github.com/priyanshusta.png" width="56" alt=""> | **Priyanshu Makwana** ([@priyanshusta](https://github.com/priyanshusta))<br>Creator and maintainer. Idea, direction and every "make it perfect". |
-| 🤖 | **Claude** by [Anthropic](https://www.anthropic.com)<br>AI pair programmer: co-wrote the code, docs and demo. |
+## Credits
 
-Built on the shoulders of [MediaPipe](https://ai.google.dev/edge/mediapipe) (hand tracking),
-[OpenCV](https://opencv.org) (camera), [PyAutoGUI](https://pyautogui.readthedocs.io) (mouse and keyboard)
-and Windows Ink (handwriting recognition).
+Created by [@priyanshusta](https://github.com/priyanshusta). Developed with Claude by Anthropic.
+Built on [MediaPipe](https://ai.google.dev/edge/mediapipe), [OpenCV](https://opencv.org),
+[PyAutoGUI](https://pyautogui.readthedocs.io) and Windows Ink.
 
-## 📜 License
+## License
 
-[MIT](LICENSE) © 2026 Priyanshu Makwana. Use it, fork it, build the future with it.
-
-<div align="center"><br><sub>◉ If ZEHEN made you feel a little like a superhero, give it a ⭐</sub></div>
+[MIT](LICENSE)
