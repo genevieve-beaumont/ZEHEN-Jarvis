@@ -8,7 +8,12 @@ guide panel in the top-right corner shows your tracked hand and the gesture you'
 
 ## Run it
 
-Needs Windows 10/11 and Python 3.10+.
+Needs Windows 10/11 and Python 3.10+ ([python.org](https://www.python.org/downloads/)).
+
+**Double-click `ZEHEN.bat`.** It finds Python even if it isn't on your PATH, installs the libraries on
+first run, and starts ZEHEN without a console window.
+
+Or from a terminal:
 
 ```bash
 python -m pip install -r requirements.txt
@@ -91,6 +96,7 @@ hand model.
 
 | File | What |
 |---|---|
+| `ZEHEN.bat` | Double-click launcher |
 | `zehen.py` | The whole app |
 | `hand_landmarker.task` | MediaPipe hand model (downloaded automatically if missing) |
 | `zehen.ico` | App icon |
