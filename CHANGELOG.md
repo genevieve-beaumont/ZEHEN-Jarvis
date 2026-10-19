@@ -18,6 +18,8 @@ First release: control Windows with your hands through the laptop camera.
 - Camera permission screen with help when the camera is blocked
 - `ZEHEN.bat` launcher that finds Python without PATH and installs libraries on first run
 - `python zehen.py --test` self-test
+- Demo video and GIF recorded on a live desktop, plus `demo/record_demo.py` to re-record it
+- Project website (`docs/index.html`), MIT license, roadmap, contributing guide, templates
 
 ### Fixed during development
 - Picks the real webcam instead of virtual cameras (PRISM Lens, OBS) that send a black placeholder
@@ -25,3 +27,4 @@ First release: control Windows with your hands through the laptop camera.
 - Handwriting recognition no longer freezes: results are polled instead of awaited
 - Touching the real mouse near a screen corner no longer stops the app; ZEHEN yields the cursor instead
 - Double-pinch lands as a real double-click, even though hand clicks drift a few pixels
+- Typing from the writing pad no longer drops letters in apps like Notepad
