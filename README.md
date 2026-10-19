@@ -28,7 +28,8 @@ tutorial. Replay it any time with **tutorial ↻** on the panel.
 | Gesture | Does |
 |---|---|
 | ☝ Index finger up | Move the cursor |
-| 🤏 Pinch thumb + index | Click. Hold and move to drag. Two quick pinches = double-click |
+| 🤏 Pinch thumb + index | Click. Hold and move to drag |
+| 🤏🤏 Pinch twice quickly | Open: a double-click on apps, files and folders |
 | 👌 Index up, thumb to middle finger | Right-click |
 | ✌ Two fingers up | Scroll: raise your hand to go up, lower it to go down |
 | 🖐 Open palm, hold | Launcher. Hold again to close any panel |

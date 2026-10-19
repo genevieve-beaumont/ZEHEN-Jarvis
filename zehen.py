@@ -42,6 +42,7 @@ LIVE_MIN_CHANGE = 0.3              # avg frame-to-frame pixel change for a "live
 ZOOM_STEP = 0.12                   # two-hand pinch: hands must spread/close this fraction for one zoom notch
 SWIPE_DIST, SWIPE_S, SWIPE_COOLDOWN = 0.18, 0.3, 0.9  # other-hand swipe: frame fraction travelled within SWIPE_S
 INK_PAUSE_S = 0.9                  # writing pad: pause this long after a stroke and the ink turns into text
+TAP_S, DOUBLE_TAP_S = 0.4, 0.7      # pinch shorter than TAP_S is a click; 2nd pinch within DOUBLE_TAP_S = open
 MOUSE_TAKEOVER_PX, MOUSE_TAKEOVER_S = 25, 1.5  # real mouse moved this far -> hands off the cursor this long
 
 BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))  # PyInstaller unpacks bundled files here
@@ -64,6 +65,7 @@ POSES = {(1, 0, 0, 0): "point", (1, 1, 0, 0): "scroll", (1, 1, 1, 0): "three",
          (1, 1, 1, 1): "palm", (0, 0, 0, 0): "fist"}
 GUIDE = [("point", "☝", "Index finger up", "Move cursor"),
          ("pinch", "🤏", "Pinch thumb + index", "Click · hold to drag · tap tiles"),
+         ("double", "🤏", "Pinch twice quickly", "Open apps, files, folders"),
          ("rpinch", "👌", "Index up, thumb→middle", "Right-click"),
          ("scroll", "✌", "Two fingers up", "Scroll ↕"),
          ("palm", "🖐", "Open palm, hold", "Launcher: apps, windows · closes panels"),
@@ -72,10 +74,11 @@ GUIDE = [("point", "☝", "Index finger up", "Move cursor"),
          ("swipe", "👋", "Swipe your other hand", "Switch app"),
          ("fist", "✊", "Fist", "Pause")]
 LABELS = {"point": "MOVE", "pinch": "GRAB", "rpinch": "RIGHT CLICK", "scroll": "SCROLL", "three": "WRITING PAD",
-          "palm": "LAUNCHER", "fist": "PAUSED", "zoom": "ZOOM", "swipe": "SWITCH"}
+          "palm": "LAUNCHER", "fist": "PAUSED", "zoom": "ZOOM", "swipe": "SWITCH", "double": "OPEN"}
 # (active gesture, seconds held, instruction, hint)
 TUTORIAL = [("point", 1.0, "Raise your index finger ☝", "Move your hand: the cursor follows your knuckle."),
-            ("pinch", 0.05, "Pinch thumb + index 🤏", "Quick pinch = click. Two quick pinches = double-click."),
+            ("pinch", 0.05, "Pinch thumb + index 🤏", "A quick pinch is a click."),
+            ("double", 0.0, "Pinch twice quickly 🤏🤏", "That's a double-click: opens apps, files and folders."),
             ("pinch", 0.8, "Pinch, hold and move", "That's drag: grab a file or window and carry it."),
             ("scroll", 1.0, "Two fingers up ✌", "Raise your hand to scroll up, lower it to scroll down."),
             ("rpinch", 0.05, "Index up, touch thumb to middle", "That's a right-click."),
@@ -327,6 +330,7 @@ class Tracker:
         self.pinch2, self.zoom_d0, self.zoom_since = False, None, 0.0
         self.swipe_hist, self.swipe_at, self.swipe_cool = [], -9.0, 0.0
         self.last_set, self.mouse_free_at = None, 0.0  # where we last put the cursor; when we may again
+        self.tap_at, self.tap_pos, self.double_at = -9.0, None, -9.0  # last quick click: double-pinch detection
         self.ui = panel()
         self._publish(0.0, [], None, None, 0.0, None, 0.0, False)
         if start:
@@ -397,8 +401,11 @@ class Tracker:
                 g = classify(lm, raw == "pinch")
                 count, raw = (count + 1 if g == raw else 1), g
                 if count >= STABLE_FRAMES and g != gesture:  # gesture changed (debounced)
-                    prev, gesture, since, fired = gesture, g, now, False
+                    prev, held = gesture, now - since
+                    gesture, since, fired = g, now, False
                     if prev == "pinch":
+                        if self.mouse_down and held < TAP_S:  # a quick click: a second one soon means "open"
+                            self.tap_at = now
                         self._release()
                         self._end_stroke(now)
                     if g == "pinch":
@@ -444,7 +451,8 @@ class Tracker:
                     self.swipe_hist = []
 
                 if (not self._mouse_taken(now) and not self.mode and not zoom and gesture in ("point", "pinch")
-                        and now >= lock_until):
+                        and now >= lock_until and now >= self.tap_at + DOUBLE_TAP_S):
+                    # (after a quick click the cursor holds still, so a second pinch opens the same thing)
                     self.last_set = (int(min(max(x, 0), sw - 1)), int(min(max(y, 0), sh - 1)))
                     pyautogui.moveTo(*self.last_set)
                 else:
@@ -474,6 +482,8 @@ class Tracker:
             active, active_since = "zoom", self.zoom_since
         if now - self.swipe_at < 0.6:
             active, active_since = "swipe", self.swipe_at
+        if now - self.double_at < 0.6:
+            active, active_since = "double", self.double_at
         with self.lock:
             ink = [list(s) for s in self.ink]
         self.state = SimpleNamespace(
@@ -503,6 +513,15 @@ class Tracker:
                     self.stroke = [(nx, ny)]
                     self.ink.append(self.stroke)
         elif not both_hands and time.monotonic() >= self.mouse_free_at:
+            now = time.monotonic()
+            if now - self.tap_at < DOUBLE_TAP_S:
+                # Windows only counts a double-click if both land within ~4 px and 0.5 s; hand clicks miss that,
+                # so send a real one at exactly where the first click went
+                pyautogui.doubleClick(*self.tap_pos)
+                self.tap_at, self.double_at = -9.0, now
+                self._flash("↗  OPEN", 0.6)
+                return
+            self.tap_pos = pyautogui.position()
             pyautogui.mouseDown()
             self.mouse_down = True
 
@@ -1056,14 +1075,26 @@ def selftest():
         t.query = "spot"
         ui = t._layout()
         assert ui.buttons and all(0 <= v <= 1 for b in ui.buttons for v in b.r), mode
-    real = pyautogui.position
+    real = pyautogui.position, pyautogui.mouseDown, pyautogui.doubleClick
+    calls = []
     pyautogui.position = lambda: (500, 500)
+    pyautogui.mouseDown = lambda *a: calls.append(("down",))
+    pyautogui.doubleClick = lambda *a: calls.append(("double", *a))
+    t.set_mode(None)
+    t._pinch_start(0, 0, both_hands=False)                  # first pinch: a normal press
+    t.mouse_down, t.tap_at = False, time.monotonic()        # ...released quickly = a click
+    t._pinch_start(0, 0, both_hands=False)                  # second pinch soon after: open it
+    assert calls == [("down",), ("double", 500, 500)], calls
+    t._pinch_start(0, 0, both_hands=False)                  # a third pinch is a fresh click again
+    assert calls[-1] == ("down",), calls
+    t.mouse_down = False
+    pyautogui.mouseDown, pyautogui.doubleClick = real[1], real[2]
     t.last_set = (500, 503)
     assert not t._mouse_taken(10.0)                         # where we left it (rounding): still ours
     t.last_set = (900, 500)
     assert t._mouse_taken(10.0) and t._mouse_taken(11.0)   # you moved it: hands off...
     assert not t._mouse_taken(10.0 + MOUSE_TAKEOVER_S)      # ...for MOUSE_TAKEOVER_S only
-    pyautogui.position = real
+    pyautogui.position = real[0]
     t.set_mode("pad")
     t.alts = ["x"]
     assert any(b.id.startswith("alt") for b in t._layout().buttons)
