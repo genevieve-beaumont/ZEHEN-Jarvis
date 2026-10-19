@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import unicodedata
 import urllib.request
 from pathlib import Path
 from tkinter import messagebox
@@ -222,9 +223,11 @@ def list_windows():
 
 
 def window_label(title):
-    doc, _, app = title.rpartition(" - ")  # "Instagram - Google Chrome" -> app on top, page below
-    app, doc = (app, doc) if doc else (title, "")
-    return f"{app[:22]}\n{doc[:26]}".strip()
+    for sep in (" - ", " — ", " – "):  # Chrome/Edge use " - "; Firefox/Notion use " — "
+        if sep in title:
+            doc, _, app = title.rpartition(sep)
+            return f"{app[:22]}\n{doc[:26]}".strip()
+    return title[:22].strip()
 
 
 def focus_window(h):
@@ -260,13 +263,19 @@ def launch(app_id):
     os.startfile("shell:AppsFolder\\" + app_id)
 
 
+def fold(s):
+    """Lowercase with accents stripped ('Paramètres' -> 'parametres', 'Caméra' -> 'camera')."""
+    return "".join(c for c in unicodedata.normalize("NFKD", s.lower().strip()) if not unicodedata.combining(c))
+
+
 def search_apps(apps, query, n=5):
-    """Best app matches for handwritten text. Fuzzy, because handwriting is: 'spotlfy' still finds Spotify."""
-    q = query.lower().strip()
+    """Best app matches for handwritten text. Fuzzy and accent-insensitive: 'spotlfy' -> Spotify,
+    'parametres' -> Paramètres."""
+    q = fold(query)
     if not q:
         return []
-    score = lambda name: (2 if name.lower().startswith(q) else 1.5 if q in name.lower()
-                          else difflib.SequenceMatcher(None, q, name.lower()[:len(q) + 2]).ratio())
+    score = lambda name: (2 if (f := fold(name)).startswith(q) else 1.5 if q in f
+                          else difflib.SequenceMatcher(None, q, f[:len(q) + 2]).ratio())
     ranked = sorted(apps, key=lambda a: -score(a[0]))
     return [a for a in ranked if score(a[0]) >= 0.75][:n]
 
@@ -664,8 +673,8 @@ class Tracker:
 
         section("OPEN WINDOWS", [(window_label(t), self._then_close(lambda h=h: focus_window(h)))
                                  for h, t in self.windows[:COLS]], "No open windows")
-        names = {n.lower(): (n, a) for n, a in self.apps}
-        favs = [names[n.lower()] for n in self.cfg.get("apps", DEFAULT_APPS) if n.lower() in names][:COLS - 1]
+        names = {fold(n): (n, a) for n, a in self.apps}
+        favs = [names[fold(n)] for n in self.cfg.get("apps", DEFAULT_APPS) if fold(n) in names][:COLS - 1]
         section("APPS", [(f"▶\n{n}", lambda n=n, a=a: self._launch(n, a)) for n, a in favs]
                 + [("🔍\nSearch all apps", lambda: self.set_mode("pad", search=True))], "")
         section("CONTROLS", [
@@ -1062,12 +1071,15 @@ def selftest():
     assert len(KEYS) == sum(len(r) for r in KEY_ROWS)
 
     apps = [("Spotify", "a"), ("Settings", "b"), ("Google Chrome", "c"), ("Calculator", "d"),
-            ("PostgreSQL documentation", "e"), ("Photos", "f")]
+            ("PostgreSQL documentation", "e"), ("Photos", "f"), ("Paramètres", "g"), ("Caméra", "h")]
     assert search_apps(apps, "spotlfy")[0][0] == "Spotify"  # handwriting typo still finds it
     assert search_apps(apps, "chrome")[0][0] == "Google Chrome"
+    assert search_apps(apps, "parametres")[0][0] == "Paramètres"  # unaccented handwriting finds accented app
+    assert search_apps(apps, "camera")[0][0] == "Caméra"
     assert search_apps(apps, "zzzz") == []
     assert [n for n, _ in search_apps(apps, "spot")] == ["Spotify"]  # no loose junk like PostgreSQL
     assert window_label("Instagram - Google Chrome") == "Google Chrome\nInstagram"
+    assert window_label("Wikipédia — Mozilla Firefox") == "Mozilla Firefox\nWikipédia"
 
     t = Tracker(None, {}, start=False)  # every panel lays out, every tile fits on screen
     t.apps = apps
@@ -1117,7 +1129,10 @@ def selftest():
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--test"]:
+    arg = sys.argv[1] if len(sys.argv) > 1 else None
+    if arg == "--test":
         selftest()
+    elif arg is None or arg.isdigit():
+        main(int(arg) if arg else None)
     else:
-        main(int(sys.argv[1]) if len(sys.argv) > 1 else None)
+        sys.exit(__doc__)  # --help or a typo: show usage instead of a traceback
