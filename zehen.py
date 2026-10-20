@@ -43,6 +43,10 @@ LIVE_MIN_CHANGE = 0.3              # avg frame-to-frame pixel change for a "live
 ZOOM_STEP = 0.12                   # two-hand pinch: hands must spread/close this fraction for one zoom notch
 SWIPE_DIST, SWIPE_S, SWIPE_COOLDOWN = 0.18, 0.3, 0.9  # other-hand swipe: frame fraction travelled within SWIPE_S
 INK_PAUSE_S = 0.9                  # writing pad: pause this long after a stroke and the ink turns into text
+INK_MIN_CUTOFF, INK_BETA = 0.5, 0.004  # pen smoothing on the pad: steadier than the cursor (lower = smoother)
+INK_HOOK = 0.15                    # look this far into each end of a stroke for the hook a pinch leaves
+INK_STRAIGHT = 0.08                # strays less than this x its length from a line -> drawn perfectly straight
+INK_ROUND = 0.16                   # closed loop whose radius varies less than this -> drawn as a clean oval
 TAP_S, DOUBLE_TAP_S = 0.4, 0.7      # pinch shorter than TAP_S is a click; 2nd pinch within DOUBLE_TAP_S = open
 MOUSE_TAKEOVER_PX, MOUSE_TAKEOVER_S = 25, 1.5  # real mouse moved this far -> hands off the cursor this long
 
@@ -130,9 +134,10 @@ def classify(lm, was_pinched):
 class OneEuro:
     """One Euro filter (Casiez 2012): heavy smoothing when the hand is still, little lag when it moves fast."""
 
-    def __init__(self):
+    def __init__(self, min_cutoff=MIN_CUTOFF, beta=BETA):
         self.t = self.x = None
         self.dx = 0.0
+        self.min_cutoff, self.beta = min_cutoff, beta
 
     def __call__(self, x, t):
         if self.t is None:
@@ -141,8 +146,65 @@ class OneEuro:
         dt, self.t = max(t - self.t, 1e-6), t
         alpha = lambda cutoff: 1 / (1 + 1 / (2 * math.pi * cutoff * dt))
         self.dx += alpha(1.0) * ((x - self.x) / dt - self.dx)
-        self.x += alpha(MIN_CUTOFF + BETA * abs(self.dx)) * (x - self.x)
+        self.x += alpha(self.min_cutoff + self.beta * abs(self.dx)) * (x - self.x)
         return self.x
+
+
+def unhook(P, window=3):
+    """Cut the hook off the start of a stroke: closing a pinch jerks the pen, leaving a short tail that
+    meets the real stroke at a sharp angle. Finds the sharpest turn in the first INK_HOOK of the path
+    and starts there; a stroke that starts smoothly is left alone."""
+    total = sum(math.dist(a, b) for a, b in zip(P, P[1:]))
+    best, best_turn, run = 0, math.radians(80), 0.0  # a pinch hook turns hard: sideways or back
+    for k in range(1, len(P) - 1):  # from the very first point: a quick flick may be just 1-2 points long
+        run += math.dist(P[k - 1], P[k])
+        if run > INK_HOOK * total:
+            break
+        # direction in over the hook, direction out over the next few points (one point alone is noise)
+        (ax, ay), (bx, by), (cx, cy) = P[max(0, k - window)], P[k], P[min(len(P) - 1, k + window)]
+        u, v = (bx - ax, by - ay), (cx - bx, cy - by)
+        if any(u) and any(v):
+            turn = math.acos(max(-1.0, min(1.0, (u[0] * v[0] + u[1] * v[1]) / (math.hypot(*u) * math.hypot(*v)))))
+            if turn > best_turn:
+                best, best_turn = k, turn
+    return P[best:]
+
+
+def beautify(points, aspect=16 / 9):
+    """Clean one air-written stroke: trim the hooks left by closing/opening the pinch, smooth out hand
+    tremor, and snap near-straight lines perfectly straight and near-round loops into clean ovals.
+    Points are screen fractions; aspect (width / height) keeps the geometry in true proportions."""
+    if len(points) < 5:
+        return points  # a tap: the dot on an i
+    P = [(x * aspect, y) for x, y in points]
+    seg = [math.dist(a, b) for a, b in zip(P, P[1:])]
+    total = sum(seg)
+    if not total:
+        return points[:1]
+    P = unhook(unhook(P)[::-1])[::-1]  # both ends
+    mean = lambda pts: (sum(q[0] for q in pts) / len(pts), sum(q[1] for q in pts) / len(pts))
+    P = [P[0]] + [mean(P[max(0, n - 2):n + 3]) for n in range(1, len(P) - 1)] + [P[-1]]  # tremor
+    for _ in range(2):  # Chaikin corner cutting: rounds what's left of the jitter into a curve
+        P = [P[0]] + [q for a, b in zip(P, P[1:]) for q in ((0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]),
+                                                           (0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]))] + [P[-1]]
+    a, b = P[0], P[-1]
+    chord, length = math.dist(a, b), sum(math.dist(p, q) for p, q in zip(P, P[1:]))
+    back = lambda pts: [(x / aspect, y) for x, y in pts]
+    if chord and max(abs((b[0] - a[0]) * (a[1] - p[1]) - (a[0] - p[0]) * (b[1] - a[1])) for p in P) / chord \
+            < INK_STRAIGHT * chord:
+        return back([(a[0] + (b[0] - a[0]) * t / 24, a[1] + (b[1] - a[1]) * t / 24) for t in range(25)])
+    if chord < 0.2 * length:  # it closes on itself: is it an oval?
+        xs, ys = [p[0] for p in P], [p[1] for p in P]
+        cx, cy, rx, ry = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2, (max(xs) - min(xs)) / 2, (max(ys) - min(ys)) / 2
+        if rx and ry:
+            r = [math.hypot((p[0] - cx) / rx, (p[1] - cy) / ry) for p in P]
+            avg = sum(r) / len(r)
+            if (sum((v - avg) ** 2 for v in r) / len(r)) ** 0.5 / avg < INK_ROUND:
+                start = math.atan2((P[0][1] - cy) / ry, (P[0][0] - cx) / rx)
+                turn = 1 if sum(p[0] * q[1] - q[0] * p[1] for p, q in zip(P, P[1:] + P[:1])) > 0 else -1
+                return back([(cx + rx * math.cos(start + turn * math.tau * t / 48),
+                              cy + ry * math.sin(start + turn * math.tau * t / 48)) for t in range(49)])
+    return back(P)
 
 
 def key_rects(x0=0.16, y0=0.56, x1=0.84, y1=0.94):
@@ -340,7 +402,7 @@ class Tracker:
         self.swipe_hist, self.swipe_at, self.swipe_cool = [], -9.0, 0.0
         self.last_set, self.mouse_free_at = None, 0.0  # where we last put the cursor; when we may again
         self.tap_at, self.tap_pos, self.double_at = -9.0, None, -9.0  # last quick click: double-pinch detection
-        self.ui = panel()
+        self.ui, self.aspect = panel(), 16 / 9
         self._publish(0.0, [], None, None, 0.0, None, 0.0, False)
         if start:
             threading.Thread(target=self._load_apps, daemon=True).start()
@@ -374,6 +436,8 @@ class Tracker:
         det, cam = make_detector(), self.cam
         sw, sh = pyautogui.size()
         fx, fy = OneEuro(), OneEuro()
+        pfx, pfy = OneEuro(INK_MIN_CUTOFF, INK_BETA), OneEuro(INK_MIN_CUTOFF, INK_BETA)
+        self.aspect = sw / sh
         raw, count, gesture, since, fired = None, 0, None, 0.0, False
         lock_until, scroll_y0, main_label = 0.0, None, None
         m = lambda v: min(max((v - MARGIN) / (1 - 2 * MARGIN), 0.0), 1.0)
@@ -399,9 +463,14 @@ class Tracker:
                 (label, lm), lm2 = hands[0], (hands[1][1] if len(hands) > 1 else None)
                 if label != main_label:  # the other hand took over the cursor: don't smooth across hands
                     main_label, fx, fy = label, OneEuro(), OneEuro()
+                    pfx, pfy = OneEuro(INK_MIN_CUTOFF, INK_BETA), OneEuro(INK_MIN_CUTOFF, INK_BETA)
 
                 # pointer = index knuckle: it stays put while pinching, unlike the fingertip
                 x, y = fx(m(lm[5].x) * sw, now), fy(m(lm[5].y) * sh, now)
+                # the pen is where a pen would be: between the pinched thumb and index tips
+                pen = pfx(m((lm[4].x + lm[8].x) / 2) * sw, now), pfy(m((lm[4].y + lm[8].y) / 2) * sh, now)
+                if self.mode == "pad":
+                    x, y = pen
                 nx, ny = x / sw, y / sh
                 self.hover = next((b.id for b in self.ui.buttons if inside(b.r, nx, ny)), None)
                 g2 = classify(lm2, self.pinch2) if lm2 is not None else None
@@ -547,6 +616,9 @@ class Tracker:
 
     def _end_stroke(self, now):
         if self.stroke is not None:
+            with self.lock:  # swap in the cleaned-up stroke: what you see is what gets read
+                if self.ink and self.ink[-1] is self.stroke:
+                    self.ink[-1] = beautify(self.stroke, self.aspect)
             self.stroke, self.ink_at = None, now
 
     def _recognize(self, strokes):
@@ -1070,6 +1142,33 @@ def selftest():
     assert [round(f(100.0, t / 30)) for t in range(5)] == [100] * 5  # still hand -> no drift
     assert len(KEYS) == sum(len(r) for r in KEY_ROWS)
 
+    import random
+    rnd = random.Random(3)
+    shake = lambda pts, amount=0.004: [(x + rnd.uniform(-amount, amount), y + rnd.uniform(-amount, amount))
+                                       for x, y in pts]
+    def hooked(pts):  # the tails a real pinch leaves: ~12% of the stroke's size, at a right angle
+        xs, ys = [x for x, _ in pts], [y for _, y in pts]
+        h = 0.12 * max(max(xs) - min(xs), max(ys) - min(ys))
+
+        def tail(end, toward):  # a short spur sticking out sideways from the stroke's end
+            dx, dy = end[0] - toward[0], end[1] - toward[1]
+            n = math.hypot(dx, dy) or 1
+            px, py = -dy / n * h, dx / n * h
+            return [(end[0] + px * t / 3, end[1] + py * t / 3) for t in range(1, 4)]
+        return tail(pts[0], pts[3])[::-1] + pts + tail(pts[-1], pts[-4])
+    messy_line = hooked(shake([(0.3 + 0.004 * k, 0.4 + 0.002 * k) for k in range(60)]))
+    clean = beautify(messy_line)
+    (ax, ay), (bx, by) = clean[0], clean[-1]
+    assert all(abs((bx - ax) * (ay - y) - (ax - x) * (by - ay)) < 1e-9 for x, y in clean)  # perfectly straight
+    messy_o = shake([(0.5 + 0.05 * math.cos(k / 20 * math.tau), 0.5 + 0.09 * math.sin(k / 20 * math.tau))
+                     for k in range(21)] * 1, 0.006)
+    ring = beautify(messy_o)
+    assert max(abs(math.hypot((x - 0.5) / 0.05, (y - 0.5) / 0.09) - 1) for x, y in ring) < 0.25  # a clean oval
+    zigzag = [(0.3 + 0.02 * k, 0.4 + (0.05 if k % 2 else 0)) for k in range(8)]
+    z = beautify(zigzag)
+    assert max(y for _, y in z) - min(y for _, y in z) > 0.02  # a w stays a w, not a line
+    assert beautify([(0.1, 0.1), (0.1, 0.1)]) == [(0.1, 0.1), (0.1, 0.1)]  # taps (dots) untouched
+
     apps = [("Spotify", "a"), ("Settings", "b"), ("Google Chrome", "c"), ("Calculator", "d"),
             ("PostgreSQL documentation", "e"), ("Photos", "f"), ("Paramètres", "g"), ("Caméra", "h")]
     assert search_apps(apps, "spotlfy")[0][0] == "Spotify"  # handwriting typo still finds it
@@ -1118,8 +1217,9 @@ def selftest():
         line = lambda x, y0, y1: [(x, y0 + (y1 - y0) * i / 10) for i in range(11)]
         oil = [[(x / 1000, y / 1000) for x, y in s] for s in
                (circle(60, 130, 28), line(130, 100, 160), [(130, 75)], line(180, 40, 160))]
+        oil_messy = [beautify(hooked(shake(s, 0.0025)) if len(s) > 1 else s, 1.0) for s in oil]  # shaky + hooks
         got = []
-        th = threading.Thread(target=lambda: got.extend(recognize(oil, 1000, 1000) for _ in range(3)))
+        th = threading.Thread(target=lambda: got.extend(recognize(o, 1000, 1000) for o in (oil, oil, oil_messy)))
         th.start()
         th.join(20)
         assert len(got) == 3 and all("oil" in [c.lower() for c in cands] for cands in got), got

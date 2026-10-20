@@ -13,6 +13,8 @@ First release: control Windows with your hands through the laptop camera.
 - Launcher (hold an open palm): open windows, favourite apps, search all apps, system controls
 - Writing pad (hold three fingers): air-writing typed through Windows' offline handwriting recognition,
   with "did you mean" suggestions, ⌫, ⌫ word, space, enter
+- Writing pad cleans each stroke as the pen lifts: the pen follows the pinched fingertips, tremor is
+  smoothed, pinch hooks are trimmed, near-straight lines snap straight and loops snap round
 - On-screen keyboard
 - Guide panel with live wireframe hands and a step-by-step tutorial
 - Camera permission screen with help when the camera is blocked

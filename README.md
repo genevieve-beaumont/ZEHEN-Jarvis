@@ -65,8 +65,9 @@ mouse hands control back instantly.
 **Launcher.** Open windows, favourite apps, search across every installed app, and system controls,
 all one pinch away.
 
-**Writing pad.** Write in the air. Windows' on-device handwriting recognition converts the ink and
-types it into the active app, with alternatives for every word.
+**Writing pad.** Write in the air. Every stroke is cleaned as the pen lifts: tremor smoothed, pinch
+hooks trimmed, near-straight lines made straight and loops made round. Windows' on-device handwriting
+recognition then converts the ink and types it into the active app, with alternatives for every word.
 
 **Precision.** One Euro filtering, debounced gestures, scale-invariant pinch detection, and click
 locking make hand input as accurate as a touchpad.
