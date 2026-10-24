@@ -1,6 +1,10 @@
+kokoro-onnx==0.6.1
 mediapipe==1.1.1
 opencv-python==5.0.0.93
 pyautogui==0.9.54
+sounddevice==0.5.6
+uiautomation==2.0.29
+vosk==0.3.45
 winrt-runtime==3.2.1
 winrt-Windows.Foundation==3.2.1
 winrt-Windows.Foundation.Collections==3.2.1

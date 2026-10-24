@@ -3,28 +3,41 @@ r"""ZEHEN: control your PC with hand gestures. Camera runs hidden; a see-through
 Install:  python -m pip install -r requirements.txt
 Run:      python zehen.py            (finds your real camera; python zehen.py 1 forces camera #1)
 Test:     python zehen.py --test
-Build:    double-click build.bat  ->  dist\ZEHEN.exe  (needs ~1 GB free disk space while building)
+Build:    double-click build.bat  ->  dist\ZEHEN.exe  (needs ~3 GB free disk space while building)
 Quit:     the X on the guide panel. Touch the real mouse/touchpad and ZEHEN lets go of the cursor.
 Settings: %USERPROFILE%\.zehen.json  ("main_hand": "Left" for left-handers, "apps": [names for the launcher])
+Voice:    say "Zehen, open Spotify". Free cloud key (faster): panel > Get key > Paste key, or env ZEHEN_API_KEY.
+          No key: a small offline model downloads on first use (needs ~1.6 GB free disk). "voice": false turns it off
 """
 import ctypes
 import difflib
+import io
 import json
 import math
 import os
+import random
+import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
 import unicodedata
+import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
+import wave
+import webbrowser
+import zipfile
 from pathlib import Path
 from tkinter import messagebox
 from types import SimpleNamespace
 
 os.environ.setdefault("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0")  # else camera open takes ~20 s on Windows
 import cv2
+import numpy as np
 import mediapipe as mp
 import pyautogui  # import before tk: it makes the process DPI-aware so tk and pyautogui agree on pixels
 from mediapipe.tasks.python import BaseOptions, vision
@@ -37,6 +50,23 @@ FIST_GUARD = 0.5                   # index tip must be this far from its knuckle
 STABLE_FRAMES = 3                  # a gesture must hold this many frames before it counts (~100 ms)
 CLICK_LOCK_S = 0.15                # cursor freezes this long when a pinch starts, so clicks land where aimed
 HOLD_S = 0.8                       # seconds to hold palm / three fingers before they fire
+TUTORIAL_SPEECH = [
+    "Let's begin. Raise your index finger and keep the rest of your hand relaxed. Move slowly, and the cursor follows your knuckle.",
+    "Now pinch your thumb and index finger together, quickly, as if picking up a grain of rice. That's a click.",
+    "Pinch twice, fast. That's a double click. It opens apps, files and folders.",
+    "Pinch, hold, and move your hand. Whatever you grabbed comes along. That's a drag.",
+    "Two fingers up, like a peace sign. Raise your hand to scroll up, lower it to scroll down.",
+    "Index finger up, then touch your thumb to your middle finger. That's a right click.",
+    "Use both hands. Pinch with each, then spread them apart to zoom in, or bring them together to zoom out.",
+    "With your other hand, wave sideways, open palm, quickly. That jumps to your last app.",
+    "Open your palm and hold it still for a moment. The launcher appears.",
+    "Show three fingers and hold. The writing pad opens. Pinch and write in the air, and I'll type it for you.",
+    "Now let me learn your voice, so I wake only for you. Say Zehen, three times, with a short pause between each.",
+    "Now the fun part. Say Zehen, then ask me something. Try: open Notepad.",
+]
+TUTORIAL_END = "That's everything. Point at the little pill to open this panel again. Say Zehen whenever you need me."
+PRAISE = ["Nice.", "Perfect.", "Smooth.", "There you go.", "Well done."]
+DWELL_S, CLOSE_S = 0.6, 5.0        # side panel: point at the pill this long to open it; folds after this long unused
 SCROLL_SPEED = 400 if sys.platform == "win32" else 10  # Windows wheel units are 120 per notch
 SCROLL_DEADZONE = 0.03
 LIVE_MIN_CHANGE = 0.3              # avg frame-to-frame pixel change for a "live" camera (real ~2, placeholder 0)
@@ -63,7 +93,9 @@ CAMERA_HELP = ("Can't reach the camera.\n\n"
                "•  Virtual cameras (PRISM, OBS) are skipped; ZEHEN needs a real one plugged in.")
 CONSENT = ("ZEHEN uses your camera to see your hand, so you can control your computer with gestures.\n\n"
            "•  The video never appears on screen.\n"
-           "•  Nothing is recorded, saved or sent anywhere: it stays on this computer.\n"
+           "•  The video is never recorded, saved or sent anywhere: it stays on this computer.\n"
+           "•  It also listens for the word \"Zehen\" through the microphone, on this computer. Only after you say "
+           "it, what you ask is sent to the free AI service you chose (or answered offline if you chose none).\n"
            "•  Pause or quit any time from the ZEHEN panel.")
 
 POSES = {(1, 0, 0, 0): "point", (1, 1, 0, 0): "scroll", (1, 1, 1, 0): "three",
@@ -90,7 +122,9 @@ TUTORIAL = [("point", 1.0, "Raise your index finger ☝", "Move your hand: the c
             ("zoom", 0.5, "Both hands: pinch, then spread 🙌", "Spread to zoom in, bring together to zoom out."),
             ("swipe", 0.0, "Swipe your other hand sideways 👋", "Open palm, quick wave: switches to your last app."),
             ("palm", HOLD_S, "Open palm 🖐, hold", "The launcher: your apps, open windows and controls."),
-            ("three", HOLD_S, "Three fingers up, hold ✍", "The writing pad: pinch and write, it types for you.")]
+            ("three", HOLD_S, "Three fingers up, hold ✍", "The writing pad: pinch and write, it types for you."),
+            ("enroll", 0.0, "Teach me your voice 🎙", "Say “Zehen” three times, with a short pause between."),
+            ("voice", 0.0, "Say “Zehen” 🎙", "Then ask: “open Notepad”. It does it, then answers out loud.")]
 KEY_ROWS = ["1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM",
             ["ESC", "TAB", "CAPS", "SPACE", "BACK", "ENTER", "WIN", "✕"]]
 SPECIAL = {"SPACE": "space", "BACK": "backspace", "ENTER": "enter", "ESC": "esc", "TAB": "tab",
@@ -102,6 +136,7 @@ HAND_LINKS = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8), (5
 KEY = "#000102"   # overlay colour that Windows makes see-through; near-black so text edges look like shadow
 CYAN, DIM, DARK, GREEN, AMBER, BG, TILE, TEXT = ("#00e5ff", "#007a8a", "#003a44", "#3dff9a", "#ffb340",
                                                  "#08121a", "#0d1f2a", "#cfeff4")
+CHIP, HAIR, SUB = "#0b222c", "#1d6674", "#7cc4cf"  # side panel: solid chips on the glass, hairlines, secondary text
 COLORS = {"cyan": CYAN, "dim": DIM, "green": GREEN, "amber": AMBER, "white": TEXT}
 
 pyautogui.PAUSE = 0  # default 0.1 s sleep per call would cap tracking at ~10 fps
@@ -368,6 +403,755 @@ def recognize(strokes, w, h, timeout=5.0):
     return [" ".join(c[0] for c in words)] + (words[0][1:4] if len(words) == 1 else [])
 
 
+# --- Voice: say "Zehen, ...", a free LLM turns it into actions on your PC ---
+
+DATA = Path.home() / ".zehen"  # models downloaded on first use live here
+VOSK_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"  # 40 MB, Apache-2.0
+VOSK_DIR = DATA / "vosk-model-small-en-us-0.15"
+LOCAL_URL = "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf"  # 1.1 GB, Apache-2.0
+LOCAL_FILE = DATA / "Qwen3-1.7B-Q4_K_M.gguf"
+LLAMA_WHEELS = "https://abetlen.github.io/llama-cpp-python/whl/cpu"  # prebuilt, so no compiler is needed
+# her voice: Kokoro-82M (Apache-2.0), a natural neural voice that runs offline; 120 MB, downloaded on first use
+KOKORO_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
+KOKORO_FILES = ("kokoro-v1.0.int8.onnx", "voices-v1.0.bin")
+VOICE_NAME = "af_heart"  # other female voices in the pack: af_bella, af_nicole, af_sarah, af_sky, bf_emma, bf_isabella
+# Vosk's small model has no word "zehen" (it hears "the him"), but it hears "Zehen" as "zane" every time and almost
+# nothing else as "zane", so that is the wake grammar. Say it differently? Set "wake": ["your", "spellings"] in the config
+WAKE_WORDS = ["zane"]
+GREETINGS = ["Good {part}. Noor online, running on electricity and mild sarcasm. Say Zehen, and I'll handle the rest.",
+             "Good {part}. Systems nominal, ego slightly inflated. Say Zehen whenever you need me.",
+             "Good {part}. I'm Noor. I do the clicking, you take the credit. Just say Zehen.",
+             "Good {part}. Noor reporting for duty. No coffee break required. Say Zehen.",
+             "Online and unreasonably cheerful. I'm Noor. Say Zehen, and I'll make your computer behave.",
+             "Good {part}. Noor here. Fully charged, vaguely overqualified. Say Zehen."]
+WAKE_STABLE = 5  # the wake word must be the phrase's first word for this many 0.1 s steps ("scroll" briefly sounds like it)
+WAKE_LIKE = {"zane", "zen", "zain", "zayn", "the", "then", "this", "he", "hes", "him", "head", "hen", "sane", "said",
+             "saint", "zayed", "hey", "a", "is"}  # what Vosk's full vocabulary writes for "Zehen": the second opinion
+# a key's prefix says which free service it's from; any OpenAI-compatible endpoint also works via "llm" in the config.
+# Free tiers change (Groq dropped Llama 3.3 from its free plan in 2026): override "model" in the config if one goes
+PROVIDERS = {"gsk_": ("https://api.groq.com/openai/v1", "openai/gpt-oss-120b"),
+             "AIza": ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-flash-latest"),
+             "sk-or-": ("https://openrouter.ai/api/v1", "openrouter/free")}
+KEY_PAGE = "https://console.groq.com/keys"
+ASK_SYSTEM = """You are NOOR, the voice assistant that runs this Windows PC for its owner, and you also just talk with them.
+Speak the way a warm, quick, dry-witted person does: natural sentences, contractions, no lists, no markdown, no emoji.
+Do the job first, then (only sometimes, and only if it is natural) add a short light remark. Never use "sir" or "madam".
+Reply with ONE JSON object and nothing else:
+{"say": "<what you say out loud: a short confirmation, or a real answer of 1 to 3 sentences when asked a question or chatted to>", "do": [ACTION, ...], "done": true}
+ACTION is an object with exactly one key:
+{"open_app": "<app name>"}  {"focus_window": "<part of an open window's title>"}  {"open_url": "https://..."}
+{"search_web": "<query>"}  {"type": "<text to type>"}  {"press": "<key or combo like ctrl+t or win+d>"}
+{"window": "max"|"min"|"close"}  {"volume": "up"|"down"}  {"media": "playpause"|"nexttrack"|"prevtrack"}
+{"open_folder": "desktop"|"downloads"|"documents"|"pictures"|"music"|"videos"}
+{"powershell": "<command>"}  runs hidden as the user and returns its output: use it for anything else on Windows
+(files, folders, settings, processes, network, installs).
+{"wait": "<seconds, max 5>"}  {"ui_list": ""} returns the names of what you can click in the window in front
+{"click": "<name from ui_list>"} clicks it.  {"scroll": "down 6"|"up 6"|"top"|"bottom"}  {"zoom": "in"|"out"}
+{"mouse": "click"|"double"|"right"} clicks wherever the pointer is now (the user points with their hand).
+To work inside an app: open_app, wait, ui_list, click, type, press enter.
+Set "done": false when you must read an output (powershell, ui_list) before the next step. At most 5 actions per step.
+Chat, questions, advice, jokes and facts: answer in "say" and leave "do" empty. Act, don't ask permission."""
+ACTIONS = {"open_app", "focus_window", "open_url", "search_web", "type", "press", "window", "volume", "media",
+           "powershell", "wait", "ui_list", "click", "scroll", "mouse", "zoom", "open_folder"}
+FOLDERS = {"desktop": "shell:Desktop", "downloads": "shell:Downloads", "documents": "shell:Personal",
+           "pictures": "shell:My Pictures", "music": "shell:My Music", "videos": "shell:My Video"}
+MAX_STEPS = 6
+_local, _local_lock, _tts, _local_used = None, threading.Lock(), None, 0.0
+
+
+def fetch(url, dest, unzip=False, progress=lambda done, size: None):
+    """Download once into ~/.zehen. Refuses up front when the disk can't hold it."""
+    DATA.mkdir(exist_ok=True)
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "ZEHEN"}), timeout=30) as r:
+        size, free = int(r.headers.get("Content-Length", 0)), shutil.disk_usage(DATA).free
+        if free < size + 5e8:
+            raise RuntimeError(f"Needs {(size + 5e8) / 1e9:.1f} GB free on this drive, you have {free / 1e9:.1f} GB")
+        part = dest.with_suffix(".part")
+        with open(part, "wb") as f:
+            while chunk := r.read(1 << 20):
+                f.write(chunk)
+                progress(f.tell(), size)
+    if unzip:
+        with zipfile.ZipFile(part) as z:
+            z.extractall(DATA)
+        part.unlink()
+    else:
+        part.replace(dest)
+
+
+def _unload_when_idle():
+    """The offline brain is about 2 GB in memory: let it go after three quiet minutes, reload on the next request."""
+    global _local
+    while _local is not None:
+        time.sleep(20)
+        if time.monotonic() - _local_used > 180 and _local_lock.acquire(blocking=False):
+            try:
+                _local = None
+            finally:
+                _local_lock.release()
+
+
+def local_llm(note=lambda s, frac=None: None, load=True):
+    """The offline brain: Qwen3 1.7B through llama.cpp. Installed and downloaded on first use, free forever.
+    load=False only makes sure it is installed and downloaded (first-run setup), without using the memory."""
+    global _local, _local_used
+    _local_used = time.monotonic()
+    if _local is None:
+        try:
+            from llama_cpp import Llama
+        except ImportError:
+            if getattr(sys, "frozen", False):
+                raise RuntimeError("The offline brain needs the Python install, not the .exe: paste a free key")
+            note("Installing the offline brain…")
+            if subprocess.run([sys.executable, "-m", "pip", "install", "llama-cpp-python", "--only-binary=:all:",
+                               "--extra-index-url", LLAMA_WHEELS], capture_output=True,
+                              creationflags=0x08000000).returncode:
+                raise RuntimeError("Couldn't install the offline brain: paste a free key instead")
+            from llama_cpp import Llama
+        if not LOCAL_FILE.exists():
+            fetch(LOCAL_URL, LOCAL_FILE, progress=lambda d, n: note(
+                f"Downloading brain {d / 1e6:.0f}/{n / 1e6:.0f} MB", d / n if n else None))
+        if not load:
+            return None
+        note("Waking the offline brain…")
+        _local = Llama(model_path=str(LOCAL_FILE), n_ctx=4096, n_threads=max(2, (os.cpu_count() or 4) // 2),
+                       verbose=False)
+        threading.Thread(target=_unload_when_idle, daemon=True).start()
+    return _local
+
+
+def tts_engine():
+    global _tts
+    if _tts is None:
+        from kokoro_onnx import Kokoro
+        for name in KOKORO_FILES:
+            if not (DATA / name).exists():
+                fetch(KOKORO_URL + name, DATA / name)
+        _tts = Kokoro(str(DATA / KOKORO_FILES[0]), str(DATA / KOKORO_FILES[1]))
+    return _tts
+
+
+NAMES = {"noor": "नूर", "zehen": "ज़ेहेन"}  # an English voice reads "Noor" as "nor": say them from Hindi spelling instead
+
+
+def tts_phonemes(tts, text):
+    """Phonemes for the voice: Devanagari runs (and our names, swapped to Devanagari) are read as Hindi, the rest
+    as English, so "I'm Noor" comes out "nuur", not "nor"."""
+    for en, hi in NAMES.items():
+        text = re.sub(rf"\b{en}\b", hi, text, flags=re.I)
+    return " ".join(tts.tokenizer.phonemize(p, "hi" if "\u0900" <= p.strip()[0] <= "\u097f" else "en-us")
+                    for p in re.findall(r"[\u0900-\u097f]+|[^\u0900-\u097f]+", text) if p.strip())
+
+
+def llm_endpoint(cfg):
+    """(base_url, model, key) from the config or env, or None: then the offline model answers."""
+    c = cfg.get("llm", {})
+    key = c.get("api_key") or os.environ.get("ZEHEN_API_KEY", "")
+    if not key:
+        return None
+    url, model = next((v for p, v in PROVIDERS.items() if key.startswith(p)), PROVIDERS["gsk_"])
+    return c.get("base_url", url), c.get("model", model), key
+
+
+def parse_plan(text):
+    """Model reply -> (say, actions, done). Only known actions with plain string values survive. Small models
+    wrap JSON in <think> tags or write {"open_app", "x"} for {"open_app": "x"}: both are repaired, and raw model
+    text is never shown or spoken."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
+    if "{" not in text:
+        return text[:200], [], True  # it just talked: that is the answer
+    try:
+        plan = json.loads(text[text.index("{"):text.rindex("}") + 1])
+        acts = [a for a in plan.get("do", []) if isinstance(a, dict) and len(a) == 1]
+        say, done = str(plan.get("say", "")), plan.get("done", True) is not False
+    except (ValueError, AttributeError, TypeError):
+        m = re.search(r'"say"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+        say = m[1] if m else ""
+        acts = [{k: v} for k, v in re.findall(r'\{\s*"(\w+)"\s*[:,]\s*"((?:[^"\\]|\\.)*)"\s*\}', text) if k != "say"]
+        done = not re.search(r'"done"\s*:\s*false', text)
+        if not say and not acts:
+            return "Sorry, I couldn't work that one out.", [], True
+    acts = [a for a in acts if next(iter(a)) in ACTIONS and isinstance(next(iter(a.values())), str)]
+    return say[:200], acts[:5], done
+
+
+# everyday commands that need no AI, so they are instant, work with no key and no internet, and never misfire
+QUICK_KEYS = {"go back": "alt+left", "back": "alt+left", "go forward": "alt+right", "forward": "alt+right",
+              "refresh": "f5", "reload": "f5", "new tab": "ctrl+t", "open new tab": "ctrl+t", "close tab": "ctrl+w",
+              "next tab": "ctrl+tab", "previous tab": "ctrl+shift+tab", "copy": "ctrl+c", "paste": "ctrl+v",
+              "cut": "ctrl+x", "undo": "ctrl+z", "redo": "ctrl+y", "select all": "ctrl+a", "save": "ctrl+s",
+              "save it": "ctrl+s", "find": "ctrl+f", "enter": "enter", "press enter": "enter", "escape": "esc",
+              "cancel": "esc", "press escape": "esc", "tab": "tab", "delete": "delete", "backspace": "backspace",
+              "page down": "pagedown", "page up": "pageup", "full screen": "f11", "fullscreen": "f11",
+              "switch window": "alt+tab", "switch app": "alt+tab", "show desktop": "win+d", "task view": "win+tab",
+              "screenshot": "win+shift+s", "take a screenshot": "win+shift+s", "mute": "volumemute",
+              "unmute": "volumemute", "mute it": "volumemute"}
+QUICK_WORDS = {"play": "playpause", "pause": "playpause", "resume": "playpause", "play pause": "playpause",
+               "pause music": "playpause", "play music": "playpause", "stop music": "playpause",
+               "pause it": "playpause", "play it": "playpause", "next song": "nexttrack", "next track": "nexttrack",
+               "skip": "nexttrack", "skip song": "nexttrack", "next": "nexttrack", "previous song": "prevtrack",
+               "previous track": "prevtrack", "last song": "prevtrack", "previous": "prevtrack"}
+
+
+QUICK_HEARD = {"scrawl": "scroll", "scrolling": "scroll", "scrolled": "scroll", "scrolls": "scroll", "clicks": "click",
+               "clicked": "click", "clique": "click", "klick": "click", "clic": "click", "quick": "click"}
+SPLIT_WORDS = [("you tube", "youtube"), ("g mail", "gmail"), ("face book", "facebook"), ("insta gram", "instagram"),
+               ("git hub", "github"), ("chat gpt", "chatgpt"), ("net flix", "netflix"), ("link din", "linkedin"),
+               ("what's app", "whatsapp"), ("whats app", "whatsapp"), ("note pad", "notepad")]
+QUICK_PHRASES = [*QUICK_KEYS, *QUICK_WORDS, "scroll down", "scroll up", "scroll down a lot", "scroll up a lot", "click",
+                 "double click", "right click", "zoom in", "zoom out", "volume up", "volume down", "close window",
+                 "minimize", "maximize"]
+
+
+SITES = {"youtube": "https://www.youtube.com", "gmail": "https://mail.google.com", "google": "https://www.google.com",
+         "facebook": "https://www.facebook.com", "instagram": "https://www.instagram.com", "twitter": "https://x.com",
+         "github": "https://github.com", "chatgpt": "https://chatgpt.com", "claude": "https://claude.ai",
+         "netflix": "https://www.netflix.com", "amazon": "https://www.amazon.com", "wikipedia": "https://www.wikipedia.org",
+         "reddit": "https://www.reddit.com", "linkedin": "https://www.linkedin.com", "maps": "https://maps.google.com",
+         "google maps": "https://maps.google.com", "google drive": "https://drive.google.com",
+         "whatsapp web": "https://web.whatsapp.com", "stack overflow": "https://stackoverflow.com",
+         "twitch": "https://www.twitch.tv", "pinterest": "https://www.pinterest.com", "outlook": "https://outlook.live.com"}
+
+
+def _quick_one(t, text, apps):
+    """One everyday command, already lower-cased and cleaned: (what to show, [actions]) or None."""
+    if t in QUICK_KEYS:
+        return t.capitalize(), [{"press": QUICK_KEYS[t]}]
+    if t in QUICK_WORDS:
+        return "Media: " + t, [{"media": QUICK_WORDS[t]}]
+    if m := re.fullmatch(r"(?:scroll|go|move) (down|up)(?: (a lot|a bit|a little|more|fast|slightly|slowly))?", t):
+        amount = {"a lot": 15, "more": 10, "fast": 15, "a bit": 3, "a little": 3, "slightly": 2, "slowly": 2}.get(m[2], 6)
+        return "Scrolling " + m[1], [{"scroll": f"{m[1]} {amount}"}]
+    if m := re.fullmatch(r"(?:scroll |go )?(?:to )?(?:the )?(top|bottom)(?: of the page)?", t):
+        return "Scrolling to the " + m[1], [{"scroll": m[1]}]
+    if re.fullmatch(r"(?:left |single )?(?:click|tap)(?: (?:it|this|that|on it))?|select (?:it|this|that)|press it", t):
+        return "Click", [{"mouse": "click"}]
+    if re.fullmatch(r"double (?:click|tap)(?: (?:it|this|that))?|open (?:it|this|that)", t):
+        return "Double click", [{"mouse": "double"}]
+    if re.fullmatch(r"right (?:click|tap)(?: (?:it|this|that))?", t):
+        return "Right click", [{"mouse": "right"}]
+    if m := re.fullmatch(r"zoom (in|out)", t):
+        return "Zoom " + m[1], [{"zoom": m[1]}]
+    if re.fullmatch(r"turn (?:the )?(?:volume )?(?:up|down)|(?:turn )?(?:the )?volume (?:up|down)|turn it (?:up|down)|louder|quieter|softer", t):
+        d = "up" if "up" in t or t == "louder" else "down"
+        return "Volume " + d, [{"volume": d}]
+    if re.fullmatch(r"close (?:this |the )?(?:window|app|program)|close it", t):
+        return "Closing", [{"window": "close"}]
+    if re.fullmatch(r"minimi[sz]e(?: (?:this|it|the window))?", t):
+        return "Minimize", [{"window": "min"}]
+    if re.fullmatch(r"maximi[sz]e(?: (?:this|it|the window))?", t):
+        return "Maximize", [{"window": "max"}]
+    if (m := re.fullmatch(r"(?:type|write|dictate) (.+)", text.strip(" .,!?"), re.I)) and not re.match(
+            r"(?:a|an|the|my|me|to|about|something|some|note|email|letter|message|story|poem)\b|.*\b(?:in|on|into|using) \w+$",
+            m[1], re.I):  # "type hello" is quick; "write a note in notepad" needs the AI
+        return "Typing", [{"type": m[1]}]
+    if t in ("what time is it", "what's the time", "whats the time", "what is the time", "tell me the time", "the time",
+             "current time", "time"):
+        return time.strftime("It's %I:%M %p.").replace("It's 0", "It's "), []  # an answer, not an action
+    if t in ("what is the date", "what's the date", "whats the date", "what day is it", "what is today's date",
+             "today's date", "what is the day today", "what's today", "what day is today"):
+        return time.strftime("Today is %A, %B %d.").replace(" 0", " "), []
+    if m := re.fullmatch(r"(?:search|google|look up|search for|search google for|google search) (.+)", t):
+        return "Searching", [{"search_web": m[1]}]
+    if m := re.fullmatch(r"(?:open|show|go to)(?: me)?(?: my| the)? (desktop|downloads|documents|pictures|music|videos)(?: folder)?", t):
+        return "Opening " + m[1], [{"open_folder": m[1]}]
+    if m := re.fullmatch(r"(?:open|launch|start|run|go to|visit)(?: the)?(?: website| site)? (.+?)(?: website| site)?", t):
+        name = m[1].replace(" dot ", ".")
+        exact = next((a for a in apps if fold(a[0]) == fold(name)), None)
+        if exact:
+            return "Opening " + exact[0], [{"open_app": exact[0]}]
+        if name in SITES:
+            return "Opening " + name, [{"open_url": SITES[name]}]
+        if re.fullmatch(r"[\w-]+(?:\.[\w-]+)+", name):
+            return "Opening " + name, [{"open_url": "https://" + name}]
+        if search_apps(apps, name, 1):
+            return "Opening " + name, [{"open_app": name}]
+        return None
+    if (m := re.fullmatch(r"(?:click|press|tap|select|choose)(?: on)?(?: the)? (.+)", t)) and m[1] not in (
+            "it", "this", "that", "here", "there", "enter", "escape"):
+        return "Clicking " + m[1], [{"click": m[1]}]
+    return None
+
+
+def quick_command(text, apps):
+    """(what to show, [actions]) for "scroll down", "click", "open youtube", "click on videos", "go back",
+    "type hello", and chains like "open youtube and click on trending"; None when it needs the AI."""
+    def one(part):
+        t = " ".join(re.sub(r"[^\w\s']", " ", re.sub(r"(?<=\w)\.(?=\w)", " dot ", part.lower())).split())
+        t = re.sub(r"^((please|hey|ok|okay|can you|could you|would you|just|now) )+", "", t)
+        t = re.sub(r"( (please|now|for me|here|there|again))+$", "", t)
+        t = " ".join(QUICK_HEARD.get(w, w) for w in t.split())
+        if t in ("like", "lick"):
+            t = "click"  # Vosk's small model writes a short "click" as "like"
+        for heard, word in SPLIT_WORDS:  # "you tube" -> "youtube"
+            t = re.sub(rf"\b{heard}\b", word, t)
+        got = _quick_one(t, part, apps)
+        if not got:  # a small mishearing: "scroll dawn", "double clic"
+            near = difflib.get_close_matches(t, QUICK_PHRASES, 1, 0.86)
+            got = _quick_one(near[0], near[0], apps) if near and near[0] != t else None
+        return got
+    if got := one(text):
+        return got
+    parts = [p for p in re.split(r"\s*,\s*|\s+and then\s+|\s+then\s+|\s+and\s+", text.strip(" .")) if p.strip()]
+    steps = [one(p) for p in parts] if len(parts) > 1 else []
+    if steps and all(steps):
+        acts = []
+        for i, (_, a) in enumerate(steps):
+            acts += a
+            if i < len(steps) - 1 and any(k in ("open_url", "open_app", "search_web") for x in a for k in x):
+                acts.append({"wait": "3.5"})  # let the page or app appear before the next step
+        return steps[0][0] + ", then " + steps[-1][0].lower(), acts
+    return None
+
+
+def chat(cfg, messages, note=lambda s, frac=None: None):
+    """One model call: the free cloud key if there is one, else the offline model. Raises RuntimeError."""
+    ep = llm_endpoint(cfg)
+    if not ep:
+        last = {**messages[-1], "content": messages[-1]["content"] + " /no_think"}  # Qwen3: skip the long thinking
+        with _local_lock:
+            out = local_llm(note).create_chat_completion(  # json_object: the decoder can only write valid JSON
+                messages=messages[:-1] + [last], max_tokens=300, temperature=0.1, response_format={"type": "json_object"})
+        return out["choices"][0]["message"]["content"]
+    url, model, key = ep
+    req = urllib.request.Request(url.rstrip("/") + "/chat/completions", json.dumps(
+        {"model": model, "temperature": 0.1, "max_tokens": 600, "messages": messages}).encode(), {
+        "Content-Type": "application/json", "Authorization": "Bearer " + key,
+        "User-Agent": "ZEHEN"})  # Cloudflare in front of some providers rejects Python's default agent
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)["choices"][0]["message"]["content"]
+    except urllib.error.HTTPError as e:
+        raise RuntimeError({401: "key rejected: paste a new one", 403: "key rejected: paste a new one",
+                            404: "that model is gone: set another in .zehen.json",
+                            429: "free limit reached: try again in a minute"}.get(e.code, f"AI error {e.code}"))
+    except (urllib.error.URLError, TimeoutError, KeyError, ValueError):
+        raise RuntimeError("couldn't reach the AI: check your connection")
+
+
+def run_powershell(cmd, timeout=30):
+    ps = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " + cmd
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
+                           encoding="utf-8", errors="replace", timeout=timeout, creationflags=0x08000000)
+    except subprocess.TimeoutExpired:
+        return "(timed out after %ds)" % timeout
+    return ((r.stdout + r.stderr).strip() or "(no output)")[:1500]
+
+
+UI_KINDS = {"ButtonControl": "button", "EditControl": "text box", "ListItemControl": "item", "TabItemControl": "tab",
+            "MenuItemControl": "menu", "HyperlinkControl": "link", "CheckBoxControl": "checkbox",
+            "ComboBoxControl": "dropdown", "TreeItemControl": "item", "RadioButtonControl": "option"}
+
+
+def ui_controls(limit=400):
+    """Clickable things in the window in front, read through Windows UI Automation (no screenshots, no vision
+    model, almost no RAM): [(kind, name, control)]. Works with any app that exposes accessibility, which is
+    nearly all of them, Electron and browsers included."""
+    import uiautomation as auto
+    top = auto.GetForegroundControl()
+    top = top.GetTopLevelControl() if top else None
+    out = []
+    for c, _ in auto.WalkControl(top, maxDepth=14) if top else []:
+        if c.ControlTypeName in UI_KINDS and c.Name.strip() and not c.IsOffscreen:
+            out.append((UI_KINDS[c.ControlTypeName], c.Name.strip().replace("\n", " "), c))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def ui_list():
+    return "\n".join(f"{k}: {n[:50]}" for k, n, _ in ui_controls(60)) or "(nothing clickable found)"
+
+
+def ui_click(name):
+    found = ui_controls()
+    want = fold(name)
+    for test in (lambda n: fold(n) == want, lambda n: want in fold(n),
+                 lambda n: difflib.SequenceMatcher(None, want, fold(n)).ratio() > 0.75):  # exact, contains, close
+        for _, n, c in found:
+            if test(n):
+                c.Click()
+                return f"clicked {n[:50]}"
+    return f"no '{name}' here: use ui_list"
+
+
+def whisper(cfg, pcm):
+    """Accurate speech-to-text through Groq's free Whisper, when the key is a Groq one. '' means: use Vosk's."""
+    ep = llm_endpoint(cfg)
+    if not ep or not ep[2].startswith("gsk_"):
+        return ""
+    wav = io.BytesIO()
+    with wave.open(wav, "wb") as w:
+        w.setnchannels(1), w.setsampwidth(2), w.setframerate(16000)
+        w.writeframes(pcm)
+    b = uuid.uuid4().hex
+    field = lambda k, v: f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+    body = (field("model", "whisper-large-v3-turbo") + field("response_format", "text") + field("temperature", "0")
+            + f'--{b}\r\nContent-Disposition: form-data; name="file"; filename="a.wav"\r\n'
+              'Content-Type: audio/wav\r\n\r\n'.encode() + wav.getvalue() + f"\r\n--{b}--\r\n".encode())
+    req = urllib.request.Request(ep[0].rstrip("/") + "/audio/transcriptions", body, {
+        "Content-Type": "multipart/form-data; boundary=" + b, "Authorization": "Bearer " + ep[2],
+        "User-Agent": "ZEHEN"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.read().decode().strip()
+    except Exception:
+        return ""
+
+
+_MEL = None
+
+
+def mfcc(pcm):
+    """12 cepstral coefficients per 10 ms of 16 kHz audio (bytes of int16), loudness and mic tone removed.
+    The voice's fingerprint for one short word."""
+    import numpy as np
+    global _MEL
+    x = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768
+    if len(x) < 1200:
+        return None
+    x = np.append(x[0], x[1:] - 0.97 * x[:-1])  # pre-emphasis
+    frames = 1 + (len(x) - 400) // 160
+    fr = x[np.arange(400)[None, :] + 160 * np.arange(frames)[:, None]] * np.hamming(400)
+    power = np.abs(np.fft.rfft(fr, 512)) ** 2
+    if _MEL is None:  # 26 mel filters from 80 Hz to 7.6 kHz, and the DCT that turns them into cepstra
+        mel = lambda f: 2595 * np.log10(1 + f / 700)
+        pts = 700 * (10 ** (np.linspace(mel(80), mel(7600), 28) / 2595) - 1)
+        bins = np.floor((512 + 1) * pts / 16000).astype(int)
+        fb = np.zeros((26, 257))
+        for m in range(26):
+            l, c, r = bins[m], bins[m + 1], bins[m + 2]
+            fb[m, l:c] = (np.arange(l, c) - l) / max(c - l, 1)
+            fb[m, c:r] = (r - np.arange(c, r)) / max(r - c, 1)
+        dct = np.cos(np.pi / 26 * (np.arange(26) + .5)[None, :] * np.arange(1, 13)[:, None])
+        _MEL = (fb, dct)
+    c = np.log(power @ _MEL[0].T + 1e-10) @ _MEL[1].T
+    return c - c.mean(0)
+
+
+def dtw(template, audio):
+    """How far `audio` is from saying `template`: dynamic time warping, free start within the first 0.3 s and free
+    end, so a word spoken fast or slow still lines up. Returns (score, end frame); lower is closer."""
+    import numpy as np
+    T, N = len(template), len(audio)
+    cost = np.sqrt(((template[:, None, :] - audio[None, :, :]) ** 2).sum(-1))
+    D = np.full((T, N), np.inf)
+    D[0, :min(N, 30)] = cost[0, :min(N, 30)]
+    for i in range(T):
+        for j in range(N):
+            if i == 0 and j < 30:
+                continue
+            best = min(D[i - 1, j] if i else np.inf, D[i, j - 1] if j else np.inf,
+                       D[i - 1, j - 1] if i and j else np.inf)
+            D[i, j] = cost[i, j] + best
+    last = D[T - 1, int(T * .6):]
+    j = int(last.argmin())
+    return float(last[j] / T), int(T * .6) + j
+
+
+class Voice:
+    """Hands-free: say "Zehen" (wake word via Vosk, offline, always listening on this PC) -> your request (Whisper if you
+    have a Groq key, else Vosk) -> on_text(text) returns what to say back. state drives the HUD."""
+
+    def __init__(self, cfg, on_text, paused, note=lambda s, frac=None: None, chatty=lambda: False):
+        self.cfg, self.on_text, self.paused, self.note, self.chatty = cfg, on_text, paused, note, chatty
+        self.state, self.error, self.muted = "loading", "", False  # loading|idle|listening|thinking|speaking|off
+        self.level, self.floor, self.spoke = 0.0, 300.0, False  # mic loudness 0..1 for the HUD; room noise; did we talk
+        self.ready, self.talk = threading.Event(), threading.Lock()  # greeting done; one voice at a time
+        self.follow = False  # after she answers, keep listening a few seconds: no need to say "Zehen" again
+        self.tpl, self.thr = self._load_templates()  # your own "Zehen", learned from three samples (see enroll)
+        self.enroll_left, self.samples, self.enrolled_now = 0, [], False
+        self.go = threading.Event()  # set by "listen now": skips the wake word
+        self.words, self.tts_ok = cfg.get("wake", WAKE_WORDS), True
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+
+    @staticmethod
+    def _load_templates():
+        try:
+            import numpy as np
+            z = np.load(DATA / "wake.npz")
+            return [z[k] for k in sorted(z.files) if k.startswith("t")], float(z["thr"])
+        except (OSError, ValueError, ImportError):
+            return None, 0.0
+
+    def enroll(self):
+        """Learn how you say "Zehen": three samples. After this it wakes only for that sound, in your voice,
+        whatever your accent, instead of leaning on a speech model that has never heard the word."""
+        self.samples, self.enroll_left, self.enrolled_now = [], 3, False
+
+    def _take_sample(self, hist, onset):
+        a = max(onset - 1, 0)
+        self.samples.append(b"".join(hist[a:len(hist) - 4]))  # from just before the word to the end of the sound
+        self.enroll_left -= 1
+        if self.enroll_left:
+            self.say(random.choice(["Again.", "Once more.", "One more time."]))
+            return
+        import numpy as np
+        tpl = [f for f in (mfcc(x) for x in self.samples) if f is not None]
+        if len(tpl) < 3:
+            self.enroll_left, self.samples = 3, []
+            self.say("That was too short. Let's try again. Say Zehen.")
+            return
+        intra = [dtw(tpl[i], tpl[j])[0] for i in range(3) for j in range(3) if i != j]
+        self.tpl, self.thr = tpl, min(max(intra) * 2.3, 17.0)  # you score 1.2 to 2 times the spread, other words 2.6 times and up
+        DATA.mkdir(exist_ok=True)
+        np.savez(DATA / "wake.npz", thr=self.thr, **{f"t{i}": t for i, t in enumerate(tpl)})
+        self.enrolled_now = True
+        self.say("Got it. I'll know you by your voice now.")
+
+    def _dtw_wake(self, hist, onset):
+        """(is it your wake word?, where it ends in seconds from the phrase start) for the first sound of a phrase."""
+        a = max(onset - 1, 0)
+        f = mfcc(b"".join(hist[a:a + 16]))  # about 1.5 s from just before the first sound
+        if f is None:
+            return False, None
+        score, end = min(dtw(t, f) for t in self.tpl)
+        if os.environ.get("ZEHEN_DEBUG"):
+            print(f"[wake] score {score:.1f} / limit {self.thr:.1f} -> {'WAKE' if score < self.thr else 'no'}", flush=True)
+        return score < self.thr, a * 0.1 + end * 0.01
+
+    def listen_now(self):
+        self.go.set()
+
+    def say(self, text):
+        """Speak without blocking the caller (the tutorial's voice)."""
+        threading.Thread(target=self.speak, args=(text,), daemon=True).start()
+
+    def _warm_voice(self):
+        try:
+            tts_engine()
+        except Exception:
+            pass  # speak() falls back to Windows' voice
+        if self.cfg.get("greeting", True):
+            h = time.localtime().tm_hour
+            part = "morning" if h < 12 else "afternoon" if h < 18 else "evening"
+            self.speak(random.choice(GREETINGS).format(part=part))
+        need_brain = llm_endpoint(self.cfg) is None and not LOCAL_FILE.exists() and self.cfg.get("brain_setup", True)
+        if need_brain:
+            self.speak("Before we start, I need to set up my brain. It's a one-time download of about a gigabyte. "
+                       "Carry on with the tutorial. I'll tell you when I'm ready.")
+        self.ready.set()
+        if llm_endpoint(self.cfg) is None and self.cfg.get("brain_setup", True):
+            try:
+                local_llm(self.note, load=False)  # first run: install and download it, with progress on the HUD
+                self.note("")
+                if need_brain:
+                    self.say("My brain is installed. Ready when you are.")
+            except RuntimeError as e:
+                self.note(str(e))
+                if need_brain:
+                    self.say("I couldn't finish setting up my brain. You can paste a free key from the panel instead.")
+
+    def _run(self):
+        try:
+            self._loop()
+        except ImportError:
+            self.state, self.error = "off", "Voice needs: pip install vosk sounddevice"
+        except Exception as e:
+            self.state, self.error = "off", str(e) if isinstance(e, RuntimeError) else f"Voice: {e}"[:90]
+
+    def _loop(self):
+        import queue
+        import sounddevice as sd
+        import vosk
+        vosk.SetLogLevel(-1)
+        if not VOSK_DIR.exists():
+            fetch(VOSK_URL, VOSK_DIR, unzip=True)
+        model = vosk.Model(str(VOSK_DIR))
+        threading.Thread(target=self._warm_voice, daemon=True).start()  # her first words shouldn't wait on a download
+        q = queue.Queue()
+        wake = lambda: vosk.KaldiRecognizer(model, 16000, json.dumps(self.words + ["[unk]"]))
+        rec, quiet, hist, stable = wake(), 0, [], 0  # hist: this phrase's audio so far
+        onset, loud_n, checked = None, 0, False  # where the phrase's first sound is; how much sound; already judged
+        with sd.RawInputStream(samplerate=16000, blocksize=1600, dtype="int16", channels=1,
+                               callback=lambda d, *_: q.put(bytes(d))):
+            self.state = "idle"
+            while True:
+                try:
+                    block = q.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                if self.muted or self.paused():
+                    continue
+                loud = self._loud(block)
+                quiet = 0 if loud else quiet + 1
+                woke, pre, cut = False, b"", None
+                if quiet == 5 or len(hist) > 100:  # half a second of quiet (or 10 s of talk): the phrase is over
+                    if self.enroll_left and onset is not None and 3 <= loud_n <= 25:
+                        self._take_sample(hist, onset)
+                    elif self.tpl and not self.enroll_left and not checked and onset is not None and loud_n >= 3:
+                        woke, cut = self._dtw_wake(hist, onset)  # a short "Zehen" on its own ends here
+                        pre = b"".join(hist)
+                    rec.Reset()
+                    hist.clear()
+                    stable, onset, loud_n, checked = 0, None, 0, False
+                hist.append(block)
+                if loud:
+                    onset = len(hist) - 1 if onset is None else onset
+                    loud_n += 1
+                pushed = self.go.is_set()
+                if self.enroll_left:
+                    pass
+                elif self.tpl:  # your own wake word: judged 0.7 s into the phrase, while you may still be talking
+                    if not woke and not checked and loud_n == 7 and onset is not None:
+                        checked = True
+                        woke, cut = self._dtw_wake(hist, onset)
+                        pre = b"".join(hist)
+                elif self._heard_wake(rec, block):  # no voice learned yet: the speech model's best guess
+                    stable += 1 if stable >= 0 else 0
+                    if stable == WAKE_STABLE:
+                        woke = self._wake_like(model, b"".join(hist))
+                        pre = b"".join(hist)
+                        stable = stable if woke else -10 ** 6
+                else:
+                    stable = 0 if stable >= 0 else stable
+                if pushed or woke:
+                    self.go.clear()
+                    self.spoke, self.follow = False, False
+                    self._command(model, q, b"" if pushed else pre, None if pushed else cut)
+                    rec, hist, stable, onset, loud_n, checked = wake(), [], 0, None, 0, False
+                    while self.spoke and not q.empty():
+                        q.get_nowait()  # her own voice, echoing in the mic. Anything you said meanwhile is kept
+                    if self.follow:
+                        self.go.set()  # conversation: listen again for a few seconds, no wake word needed
+                    self.state = "idle"
+
+    def _loud(self, block):
+        """True when this 0.1 s of audio is speech. Also feeds the HUD's level meter and tracks the room's noise."""
+        import numpy as np
+        level = float(np.sqrt(np.mean(np.frombuffer(block, np.int16).astype(np.float32) ** 2)))
+        self.floor = min(level, self.floor * 1.002 + 0.5)  # the room's quietest level: drops at once, creeps up slowly
+        self.level = self.level * 0.6 + 0.4 * min(1.0, level / 3500)
+        return level > max(120.0, self.floor * 2.5)
+
+    def _heard_wake(self, rec, block):
+        """True only when a phrase *begins* with the wake word: the same sound in the middle of a sentence
+        ("that's insane") is ignored, so ordinary talk never wakes it. (Vosk merges unknown words into one
+        [unk], so "hey zehen" can't be told from "the plane is insane": the wake word has to come first.)"""
+        done = rec.AcceptWaveform(block)
+        words = json.loads(rec.Result() if done else rec.PartialResult()).get("text" if done else "partial", "").split()
+        return bool(words) and words[0] in self.words
+
+    @staticmethod
+    def _wake_like(model, pcm):
+        import vosk
+        r = vosk.KaldiRecognizer(model, 16000)
+        r.AcceptWaveform(pcm)
+        first = json.loads(r.FinalResult())["text"].split(" ")[0]
+        return first in WAKE_LIKE
+
+    def _command(self, model, q, phrase=b"", cut=None):
+        """Hear the request. phrase = the audio so far, wake word included: it's transcribed again from the start
+        and everything up to the end of the wake word is cut by its timestamps, so nothing is lost or left over."""
+        import queue
+        import vosk
+        self.state = "listening"
+        rec = vosk.KaldiRecognizer(model, 16000)
+        rec.SetWords(True)
+        audio, words, spoke, t0 = [], [], False, time.monotonic()
+        feed = [phrase[i:i + 3200] for i in range(0, len(phrase), 3200)]
+        quiet, live_loud, phrase_loud, phrase_cmd, n = 0, 0, 0, 0, 0
+        while time.monotonic() - t0 < 15:
+            live = not feed
+            n += 0 if live else 1  # which 0.1 s of the pre-recorded phrase this is
+            if feed:
+                block = feed.pop(0)
+            else:
+                try:
+                    block = q.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+            audio.append(block)
+            if self._loud(block):
+                quiet = 0
+                live_loud += live
+                phrase_loud += not live
+                phrase_cmd += (not live) and cut is not None and n * 0.1 >= cut  # sound after the wake word: a request
+            else:
+                quiet += 1
+            if rec.AcceptWaveform(block):
+                words += json.loads(rec.Result()).get("result", [])
+            elif json.loads(rec.PartialResult())["partial"]:
+                spoke = True
+            if live and quiet >= 7 and (live_loud or phrase_cmd >= 2 or (cut is None and phrase_loud >= 8)
+                                        or time.monotonic() - t0 > 2.5):
+                break  # a real pause after you stopped talking: that was the whole request
+            if not spoke and not words and live and time.monotonic() - t0 > 6:
+                return  # woke, then nobody spoke
+        words += json.loads(rec.FinalResult()).get("result", [])
+        pcm = b"".join(audio)
+        if cut is None:
+            cut = 0.0
+        if phrase and words and cut == 0.0:
+            g = vosk.KaldiRecognizer(model, 16000, json.dumps(self.words + ["[unk]"]))
+            g.SetWords(True)
+            g.AcceptWaveform(pcm)
+            # where the wake word ends: the grammar's say-so, else a typical "Zehen" length after the first word
+            cut = next((w["end"] for w in json.loads(g.FinalResult()).get("result", []) if w["word"] in self.words),
+                       words[0]["start"] + 0.4)
+        text = " ".join(w["word"] for w in words if w["start"] >= cut)
+        if os.environ.get("ZEHEN_DEBUG"):
+            print(f"[heard] cut {cut:.2f}s words {[(w['word'], round(w['start'], 2)) for w in words]}", flush=True)
+        if phrase:  # the tail of "Zehen" can still decode as a word or two of its own ("the head", "like")
+            junk, toks = {"the", "then", "this", "him", "he", "hen", "head", "hank", "like", "zane", "zen", "zain", "zehen", "he's"}, text.split()
+            for _ in range(2):
+                if toks and len(toks) > 1 and toks[0] in junk:
+                    toks.pop(0)
+            text = " ".join(toks)
+        self.state = "thinking"
+        heard = whisper(self.cfg, pcm)  # Whisper transcribes the whole clip, so it still starts with the wake word
+        if heard:
+            first, _, rest = heard.partition(" ")
+            text = rest if difflib.get_close_matches(first.strip(",.!?").lower(), ["zehen", "zen", "zane", "zayn",
+                                                                                   "zain", "zahen"], 1, 0.6) else heard
+        if len(text.strip()) > 1:
+            reply = self.on_text(text.strip())
+            self.speak(reply)
+            self.follow = bool(reply) and self.chatty() and not self.cfg.get("no_follow_up")  # a chat answer invites a reply
+        else:
+            self.state = "idle"
+
+    def speak(self, text):
+        """Say it out loud: Kokoro's neural female voice, or Windows' own voice if that isn't available.
+        The mic is muted meanwhile so it can't hear itself."""
+        if not text:
+            return
+        self.talk.acquire()  # one voice at a time: the tutorial, the greeting and replies queue up politely
+        self.state, self.muted, self.spoke = "speaking", True, True
+        try:
+            if self.tts_ok:
+                try:
+                    import sounddevice as sd
+                    tts = tts_engine()
+                    samples, rate = tts.create(tts_phonemes(tts, text), voice=self.cfg.get("voice_name", VOICE_NAME),
+                                               speed=1.05, is_phonemes=True)
+                    sd.play(samples, rate)
+                    sd.wait()
+                    return
+                except Exception:
+                    self.tts_ok = False  # no model yet and no internet, or no kokoro-onnx: don't retry every sentence
+            ps = ("Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                  "$s.SelectVoiceByHints('Female'); $s.Speak($env:ZEHEN_SAY)")
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps], env={**os.environ, "ZEHEN_SAY": text},
+                           timeout=30, creationflags=0x08000000)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            self.muted = False
+            if self.state == "speaking":
+                self.state = "idle"
+            self.talk.release()
+
+
+def clipboard_text():
+    ps = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard -Raw"
+    return subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, encoding="utf-8",
+                          timeout=10, creationflags=0x08000000).stdout.strip()
+
+
 def ctrl_scroll(notches):
     pyautogui.keyDown("ctrl")
     try:
@@ -393,6 +1177,7 @@ class Tracker:
         self.running, self.paused, self.error, self.mouse_down = True, False, None, False
         self.lock = threading.Lock()  # guards self.ink: the recognizer thread trims it while we draw into it
         self.mode, self.search = None, False  # mode: None | "launcher" | "pad" | "keyboard"
+        self.reply, self.reply_at, self.dl = "", -99.0, None  # voice: what it last said, or what went wrong, and when
         self.ink, self.stroke, self.ink_at, self.recognizing = [], None, 0.0, False
         self.chunks, self.query, self.alts = [], "", []  # chunks: text the pad typed, so "⌫ word" can undo it
         self.windows, self.apps, self.search_cache = [], [], ("", [])
@@ -404,15 +1189,28 @@ class Tracker:
         self.tap_at, self.tap_pos, self.double_at = -9.0, None, -9.0  # last quick click: double-pinch detection
         self.ui, self.aspect = panel(), 16 / 9
         self._publish(0.0, [], None, None, 0.0, None, 0.0, False)
+        self.memory, self.camera_on = [], cfg.get("camera_on", True)  # memory: the last few things you asked
+        self.chatty = False  # the last request was a conversation (no actions): she keeps listening for your reply
+        self.voice = (Voice(cfg, self._agent, lambda: self.paused, self._say, lambda: self.chatty)
+                      if start and cfg.get("voice", True) else None)
         if start:
+            if self.voice and sys.platform == "win32":
+                self.voice.start()
             threading.Thread(target=self._load_apps, daemon=True).start()
             threading.Thread(target=self._run, daemon=True).start()
 
     def _load_apps(self):
+        cache = DATA / "apps.json"  # last time's list is there at once; today's replaces it a few seconds later
+        try:
+            self.apps = [tuple(a) for a in json.loads(cache.read_text(encoding="utf-8"))]
+        except (OSError, ValueError):
+            pass
         try:
             self.apps = installed_apps()
+            DATA.mkdir(exist_ok=True)
+            cache.write_text(json.dumps(self.apps), encoding="utf-8")
         except Exception:
-            self.apps = []  # launcher still has windows, controls and the writing pad
+            pass  # launcher still has windows, controls and the writing pad
 
     def _run(self):
         try:
@@ -433,7 +1231,7 @@ class Tracker:
         self.flash, self.flash_until = text, time.monotonic() + secs
 
     def _loop(self):
-        det, cam = make_detector(), self.cam
+        det = make_detector()
         sw, sh = pyautogui.size()
         fx, fy = OneEuro(), OneEuro()
         pfx, pfy = OneEuro(INK_MIN_CUTOFF, INK_BETA), OneEuro(INK_MIN_CUTOFF, INK_BETA)
@@ -443,10 +1241,27 @@ class Tracker:
         m = lambda v: min(max((v - MARGIN) / (1 - 2 * MARGIN), 0.0), 1.0)
         try:
             while self.running:
-                ok, frame = cam.read()
+                now = time.monotonic()
+                if not self.camera_on:  # voice only: release the camera so its light goes out
+                    if self.cam is not None:
+                        self.cam.release()
+                        self.cam = None
+                    self._release()
+                    self._end_stroke(now)
+                    raw, count, gesture, scroll_y0, self.zoom_d0, self.hover = None, 0, None, None, None, None
+                    self.ui = self._layout()
+                    self._publish(now, [], None, None, 0.0, None, now, False)
+                    time.sleep(0.1)
+                    continue
+                if self.cam is None:
+                    self.cam = open_camera(self.cfg.get("camera", 0))
+                    if self.cam is None:
+                        self.camera_on = False  # couldn't reopen it: stay voice only rather than crash
+                        self._say("Camera won't open. Staying voice only.")
+                        continue
+                ok, frame = self.cam.read()
                 if not ok:
                     raise RuntimeError(CAMERA_HELP)
-                now = time.monotonic()
                 rgb = cv2.cvtColor(cv2.flip(frame, 1), cv2.COLOR_BGR2RGB)  # mirror: move right = cursor right
                 res = det.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), int(now * 1000))
                 # MediaPipe labels handedness assuming a mirrored image, which we give it, so labels are real
@@ -552,7 +1367,8 @@ class Tracker:
                 self._publish(now, [lm] + ([lm2] if lm2 is not None else []), (nx, ny), ptr2, progress,
                               gesture, since, zoom)
         finally:
-            cam.release()
+            if self.cam is not None:
+                self.cam.release()
 
     def _publish(self, now, hands, ptr, ptr2, progress, gesture, since, zoom):
         active, active_since = gesture, since
@@ -642,8 +1458,13 @@ class Tracker:
             self._type(gap + best)
 
     def _type(self, text):
-        # a small gap per key: at full speed Notepad dropped letters ("look ma" arrived as "look a")
-        pyautogui.write(text, interval=0.015)  # ponytail: ASCII only; non-English text needs clipboard paste
+        if text.isascii():
+            # a small gap per key: at full speed Notepad dropped letters ("look ma" arrived as "look a")
+            pyautogui.write(text, interval=0.015)
+        else:  # Hindi, accents, emoji: paste it, since keys can't type them
+            subprocess.run(["powershell", "-NoProfile", "-Command", "Set-Clipboard -Value $env:ZEHEN_SAY"],
+                           env={**os.environ, "ZEHEN_SAY": text}, creationflags=0x08000000)
+            pyautogui.hotkey("ctrl", "v")
         self.chunks.append(text)
 
     def _use_alt(self, alt):
@@ -679,6 +1500,119 @@ class Tracker:
             self.query += " "
         else:
             self._type(" ")
+
+    def _say(self, text, frac=None):
+        self.reply, self.reply_at, self.dl = text, time.monotonic(), frac  # frac: download progress 0..1, else None
+
+    def _agent(self, text):
+        """Voice: ask the model, do what it says, show it the output, repeat until done. Runs on the voice thread.
+        Pausing (fist or ⏸) stops it between steps. Returns what to say back."""
+        if m := re.search(r"\b(?:(?:turn|switch) (on|off) (?:the )?camera|camera (on|off)|(voice only|no camera))\b",
+                          fold(text)):
+            on = (m[1] or m[2]) == "on"
+            self.set_camera(on)
+            return "Camera on. Hands are back." if on else "Camera off. Voice only, as requested."
+        if self.voice and re.search(r"\b(?:learn|train|teach|retrain|calibrate|recalibrate)\b.*\bvoice\b", fold(text)):
+            self.voice.enroll()
+            return "Say Zehen, three times, with a short pause between each."
+        quick = quick_command(text, self.apps)
+        if quick and not quick[1]:  # a fact she knows for certain (the time): say it, no model to make one up
+            self._say(quick[0])
+            return quick[0]
+        if quick:  # no model, no wait: scroll, click, go back... happen at once and quietly
+            self._say(quick[0])
+            out = [o for o in (self._do(*next(iter(a.items()))) for a in quick[1]) if o]
+            self.memory = (self.memory + [f"{text} => {quick[0]}"])[-5:]
+            bad = next((o for o in out if o.startswith("no '")), "")
+            return ("I can't find that here." if bad else "")
+        windows = "; ".join(t[:40] for _, t in list_windows()[:10]) or "none"
+        earlier = "".join(f"Earlier: {e}\n" for e in self.memory)  # so "now click the first one" makes sense
+        msgs = [{"role": "system", "content": ASK_SYSTEM},
+                {"role": "user", "content": f"Installed apps: {', '.join(n for n, _ in self.apps[:80])}\n"
+                                            f"Open windows: {windows}\n{earlier}Request: {text}"}]
+        self._say("")
+        say, acts = "", []
+        self.chatty = False
+        try:
+            for _ in range(MAX_STEPS):
+                reply = chat(self.cfg, msgs, self._say)
+                say, acts, done = parse_plan(reply)
+                out = [o for o in (self._do(*next(iter(a.items()))) for a in acts) if o]
+                if done or not out or self.paused:
+                    break
+                msgs += [{"role": "assistant", "content": reply},
+                         {"role": "user", "content": "Output:\n" + "\n".join(out)}]
+        except RuntimeError as e:
+            say = str(e)
+        except Exception as e:
+            say = f"{type(e).__name__}: {e}"
+        say = re.sub(r"\s+", " ", re.sub(r"[^\w\s.,!?'\-:;()%/&+@#$]", "", say)).strip()  # no emoji or markdown to read aloud
+        self.chatty = not acts and bool(say)
+        self._say(say or "Done.")  # also clears any download bar
+        self.memory = (self.memory + [f"{text} => {self.reply}"])[-5:]
+        return self.reply
+
+    def set_camera(self, on):
+        """Camera off = voice only: the sensor really stops (its light goes out) and hands are ignored."""
+        self.camera_on = on
+        self.cfg["camera_on"] = on
+        save_config(self.cfg)
+
+    def _do(self, kind, v):
+        """Run one model-chosen action; powershell returns its output so the model can see it."""
+        if kind == "open_app":
+            if m := search_apps(self.apps, v, 1):
+                launch(m[0][1])
+        elif kind == "focus_window":
+            if m := next((h for h, t in list_windows() if fold(v) in fold(t)), None):
+                focus_window(m)
+        elif kind == "open_url":
+            if v.startswith(("http://", "https://")):
+                webbrowser.open(v)
+        elif kind == "search_web":
+            webbrowser.open("https://www.google.com/search?q=" + urllib.parse.quote(v))
+        elif kind == "type":
+            self._type(v)
+        elif kind == "press":
+            keys = [k.strip().lower() for k in v.split("+")]
+            if all(k in pyautogui.KEYBOARD_KEYS for k in keys):
+                pyautogui.hotkey(*keys)
+        elif kind == "window" and v in ("max", "min", "close"):
+            window_cmd(v)
+        elif kind == "volume" and v in ("up", "down"):
+            pyautogui.press("volume" + v, presses=5)
+        elif kind == "media" and v in ("playpause", "nexttrack", "prevtrack"):
+            pyautogui.press(v)
+        elif kind == "powershell":
+            return run_powershell(v)
+        elif kind == "scroll":
+            d, _, n = v.partition(" ")
+            if d in ("top", "bottom"):
+                pyautogui.press("home" if d == "top" else "end")
+            elif d in ("up", "down"):
+                pyautogui.scroll((1 if d == "up" else -1) * int(n or 6) * (120 if sys.platform == "win32" else 1))
+        elif kind == "mouse":
+            {"click": pyautogui.click, "double": pyautogui.doubleClick, "right": pyautogui.rightClick}.get(
+                v, lambda: None)()
+        elif kind == "zoom":
+            ctrl_scroll(3 if v == "in" else -3)
+        elif kind == "open_folder" and v in FOLDERS:
+            os.startfile(FOLDERS[v])
+        elif kind == "wait":
+            time.sleep(min(float(v) if v.replace(".", "", 1).isdigit() else 1.0, 5.0))
+        elif kind == "ui_list":
+            return ui_list()
+        elif kind == "click":
+            return ui_click(v)
+
+    def _paste_key(self):
+        key = clipboard_text()
+        if len(key) < 20 or " " in key or "\n" in key:
+            self._say("Copy your key first, then tap Paste key")
+            return
+        self.cfg.setdefault("llm", {})["api_key"] = key
+        save_config(self.cfg)
+        self._say("Key saved. Say: Zehen, open Spotify.")
 
     def _enter(self):
         if self.search:
@@ -746,9 +1680,10 @@ class Tracker:
         section("OPEN WINDOWS", [(window_label(t), self._then_close(lambda h=h: focus_window(h)))
                                  for h, t in self.windows[:COLS]], "No open windows")
         names = {fold(n): (n, a) for n, a in self.apps}
-        favs = [names[fold(n)] for n in self.cfg.get("apps", DEFAULT_APPS) if fold(n) in names][:COLS - 1]
+        favs = [names[fold(n)] for n in self.cfg.get("apps", DEFAULT_APPS) if fold(n) in names][:COLS - 2]
         section("APPS", [(f"▶\n{n}", lambda n=n, a=a: self._launch(n, a)) for n, a in favs]
-                + [("🔍\nSearch all apps", lambda: self.set_mode("pad", search=True))], "")
+                + [("🔍\nSearch all apps", lambda: self.set_mode("pad", search=True)),
+                   ("🎙\nVoice", self._then_close(lambda: self.voice and self.voice.listen_now()))], "")
         section("CONTROLS", [
             ("⌨\nKeyboard", lambda: self.set_mode("keyboard")),
             ("✍\nWriting pad", lambda: self.set_mode("pad")),
@@ -807,6 +1742,27 @@ def click_through(win, clicks=False):
     u.SetWindowLongW(hwnd, -20, style if clicks else style | 0x20)     # | TRANSPARENT (click-through)
 
 
+def glass(win, tint):
+    """Windows: frosted-acrylic blur behind the window (tint is 0xAABBGGRR) and rounded corners.
+    Pixels drawn in the window's transparent colour show the blur. Returns False where Windows can't."""
+    if sys.platform != "win32":
+        return False
+    win.update_idletasks()
+    hwnd = u32.GetParent(win.winfo_id())
+
+    class Accent(ctypes.Structure):
+        _fields_ = [("state", ctypes.c_int), ("flags", ctypes.c_int), ("tint", ctypes.c_uint), ("anim", ctypes.c_int)]
+
+    class Data(ctypes.Structure):
+        _fields_ = [("attr", ctypes.c_int), ("data", ctypes.c_void_p), ("size", ctypes.c_size_t)]
+    u32.SetWindowCompositionAttribute.argtypes = [wintypes.HWND, ctypes.c_void_p]
+    dwm.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+    dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(ctypes.c_int(2)), 4)  # DWMWA_WINDOW_CORNER_PREFERENCE: round (Win 11)
+    accent = Accent(4, 2, tint, 0)  # 4 = ACCENT_ENABLE_ACRYLICBLURBEHIND
+    data = Data(19, ctypes.cast(ctypes.byref(accent), ctypes.c_void_p), ctypes.sizeof(accent))  # 19 = WCA_ACCENT_POLICY
+    return bool(u32.SetWindowCompositionAttribute(hwnd, ctypes.byref(data)))
+
+
 class HUD:
     def __init__(self, root, tracker, cfg):
         self.root, self.t, self.cfg = root, tracker, cfg
@@ -814,7 +1770,10 @@ class HUD:
         self.W, self.H = root.winfo_screenwidth(), root.winfo_screenheight()
         self.tut = None if cfg.get("tutorial_done") else 0
         self.great_until = self.step_start = 0.0
-        self.collapsed = False
+        self.open, self.armed, self.over_since, self.left_at = False, True, None, None  # side panel: pill or full
+        self.cw = self.ch = None  # the panel's current (eased) size
+        self.bars, self.pill_bottom = [3.0] * 5, 0  # the wave's bar heights; where the pill ends (captions go below)
+        self.spoken, self.praise = None, False  # which tutorial step she last spoke
 
         root.overrideredirect(True)
         root.geometry(f"{self.W}x{self.H}+0+0")
@@ -828,12 +1787,21 @@ class HUD:
         self.panel = tk.Toplevel(root)
         self.panel.overrideredirect(True)
         self.panel.attributes("-topmost", True)
-        self.pc = tk.Canvas(self.panel, bg=BG, highlightthickness=1, highlightbackground=DIM)
+        self.pc = tk.Canvas(self.panel, bg=KEY, highlightthickness=0)
         self.pc.pack(fill="both", expand=True)
-        for tag, fn in (("btn_pause", self.toggle_pause), ("btn_min", self.toggle_collapse),
-                        ("btn_quit", self.quit), ("btn_tut", self.restart_tutorial), ("btn_skip", self.skip_tutorial)):
+        for tag, fn in (("btn_pause", self.toggle_pause), ("btn_min", self.toggle_open),
+                        ("btn_quit", self.quit), ("btn_tut", self.restart_tutorial), ("btn_skip", self.skip_tutorial),
+                        ("btn_voice", lambda: self.t.voice and self.t.voice.listen_now()),
+                        ("btn_cam", lambda: self.t.set_camera(not self.t.camera_on)),
+                        ("btn_getkey", lambda: webbrowser.open(KEY_PAGE)),
+                        ("btn_pastekey", lambda: threading.Thread(target=self.t._paste_key, daemon=True).start())):
             self.pc.tag_bind(tag, "<Button-1>", lambda e, fn=fn: fn())
         click_through(self.panel, clicks=True)
+        self.frosted = glass(self.panel, 0x661A1208)  # tint = BG at ~40%: the desktop shows through, blurred
+        if self.frosted:
+            self.panel.attributes("-transparentcolor", KEY)  # undrawn pixels become the blurred glass
+        else:
+            self.pc.config(bg=BG, highlightthickness=1, highlightbackground=DIM)  # older Windows: solid panel
         self.tick()
 
     def px(self, v):
@@ -846,11 +1814,25 @@ class HUD:
     def toggle_pause(self):
         self.t.paused = not self.t.paused
 
-    def toggle_collapse(self):
-        self.collapsed = not self.collapsed
+    def toggle_open(self):
+        self.open = not self.open
+        self.armed = False  # pointing at the pill that just closed must not reopen it: leave first
 
     def restart_tutorial(self):
-        self.tut, self.step_start = 0, time.monotonic()
+        self.tut, self.step_start, self.spoken = 0, time.monotonic(), None
+
+    def narrate(self, now):
+        """The tutorial out loud, step by step, so you can watch your hand instead of reading."""
+        v = self.t.voice
+        if not v or not self.cfg.get("tutorial_voice", True) or not v.ready.is_set() or now < self.great_until:
+            return
+        if self.spoken != self.tut:
+            self.spoken = self.tut
+            text = TUTORIAL_SPEECH[self.tut] if self.tut < len(TUTORIAL) else TUTORIAL_END
+            v.say((random.choice(PRAISE) + " " if self.praise else "") + text)
+            self.praise = False
+            if self.tut < len(TUTORIAL) and TUTORIAL[self.tut][0] == "enroll":
+                v.enroll()  # listens as soon as she has finished speaking
 
     def skip_tutorial(self):
         self.tut, self.great_until = len(TUTORIAL), 0.0
@@ -873,10 +1855,18 @@ class HUD:
             else:
                 g, hold = TUTORIAL[self.tut][:2]
                 # the gesture must start after the step appeared, so one long pinch can't pass two steps
-                if s.active == g and s.since >= self.step_start and now - s.since >= hold:
+                voice = self.t.voice
+                if g in ("voice", "enroll") and not voice:
+                    self.tut += 1  # no voice on this PC: nothing to try
+                elif (voice and voice.enrolled_now if g == "enroll" else
+                      voice and voice.state in ("listening", "thinking", "speaking") if g == "voice" else
+                        s.active == g and s.since >= self.step_start and now - s.since >= hold):
                     self.tut += 1
+                    self.praise = True
                     self.great_until = now + (3.0 if self.tut == len(TUTORIAL) else 1.0)
                     self.step_start = self.great_until
+        if self.tut is not None:
+            self.narrate(now)
         self.draw_overlay(s, now)
         self.draw_panel(s, now)
         self.root.after(33, self.tick)  # ~30 fps, matches the camera
@@ -921,6 +1911,12 @@ class HUD:
         if s.flash:
             c.create_text(W / 2 + 2, px(40) + 2, text=s.flash, fill=DARK, font=self.font(28, True))
             c.create_text(W / 2, px(40), text=s.flash, fill=CYAN, font=self.font(28, True))
+        age = now - self.t.reply_at
+        if self.t.reply and age < 7 and self.voice_mode(now) != "working":  # what she said: small, below the pill
+            col = TEXT if age < 5.5 else SUB if age < 6.3 else DIM  # fades out
+            for dx, dy, fg in ((1, 1, "#02060a"), (0, 0, col)):
+                c.create_text(W - px(18) + dx, self.pill_bottom + px(12) + dy, text=self.t.reply, anchor="ne",
+                              justify="right", fill=fg, font=self.font(13), width=px(300))
 
     def draw_pointer(self, c, s, now):
         px = self.px
@@ -944,73 +1940,224 @@ class HUD:
         if label:
             c.create_text(x + px(44), y + px(4), text=label, anchor="w", fill=CYAN, font=self.font(13, True))
 
+    def mono(self, size, bold=False):
+        return ("Consolas", self.px(size) * -1, "bold" if bold else "normal")
+
+    def chip(self, x0, y0, x1, y1, r=10, fill=CHIP, outline="", tags=(), width=1, state="normal"):
+        """Rounded rectangle on the side panel (a smoothed polygon: tk has no rounded rectangles)."""
+        pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1, x1 - r, y1,
+               x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
+        return self.pc.create_polygon(pts, smooth=True, fill=fill, outline=outline, width=width, tags=tags,
+                                      state=state)  # "disabled": for rims and decoration, so clicks reach what's under
+
+    def voice_mode(self, now):
+        """What the voice is doing: loading | idle | listening | speaking | working | paused | off."""
+        v = self.t.voice
+        if self.t.paused:
+            return "paused"
+        if v and v.enroll_left:
+            return "enrolling"
+        state = v.state if v else "off"
+        if state == "thinking" or (self.t.dl is not None and now - self.t.reply_at < 30):
+            return "working"
+        return state
+
+    def status(self, s, now):
+        """What the pill says: (label, detail, colour). Voice first, then what your hand is doing."""
+        v, mode = self.t.voice, self.voice_mode(now)
+        if mode == "paused":
+            return "PAUSED", "fist or the pause button to resume", AMBER
+        if mode == "working":  # never the word "thinking": say what is actually happening
+            return (self.t.reply or "").strip()[:30], "", AMBER
+        if mode == "enrolling":
+            return "SAY ZEHEN", f"{4 - v.enroll_left} of 3", CYAN
+        if mode in ("listening", "speaking"):
+            return mode.upper(), "go ahead" if mode == "listening" else "", GREEN
+        if s.mode:
+            return {"launcher": "LAUNCHER", "pad": "WRITING PAD", "keyboard": "KEYBOARD"}[s.mode], "open palm closes it", CYAN
+        gesture = next((g for g in GUIDE if g[0] == s.active), None)
+        if gesture and s.hands:
+            return LABELS[s.active], gesture[3], CYAN
+        if not self.t.camera_on:
+            return "VOICE ONLY", 'say "zehen" to talk', CYAN
+        idle = v.error if v and mode == "off" else 'say "zehen" to talk' if mode == "idle" else "waking up"
+        return ("TRACKING", idle, GREEN) if s.hands else ("SHOW YOUR HAND", idle, AMBER)
+
+    def draw_wave(self, c, x, cy, mode, now, col, hands=False, tags=()):
+        """Five bars that move like the voice: they follow the mic when listening, ripple when working, swell
+        when speaking, and just breathe when idle. Each eases toward its target, so nothing ever jumps."""
+        px, v = self.px, self.t.voice
+        level = v.level if v else 0.0
+        for i in range(5):
+            ph = now * 9 + i * 1.1
+            target = {"listening": 4 + 26 * level * (0.55 + 0.45 * math.sin(ph) ** 2),
+                      "enrolling": 4 + 26 * level * (0.55 + 0.45 * math.sin(ph) ** 2),
+                      "speaking": 7 + 12 * (0.5 + 0.5 * math.sin(ph * .8)) * (0.6 + 0.4 * math.sin(now * 3 + i)),
+                      "working": 6 + 10 * (0.5 + 0.5 * math.sin(now * 5.5 - i * 0.9))}.get(
+                mode, (5, 9, 13, 9, 5)[i] * (0.8 + 0.2 * math.sin(now * 2 + i * .6)) if hands else
+                3.5 + 1.8 * math.sin(now * 1.7 + i * .7))
+            self.bars[i] += (target - self.bars[i]) * 0.35
+            h, bx = self.bars[i] * self.s, x + i * px(7)
+            self.chip(bx, cy - h / 2, bx + px(3), cy + h / 2, px(1.5), fill=col, tags=tags, state="disabled")
+
     def draw_panel(self, s, now):
-        c, px, w = self.pc, self.px, self.px(330)
+        c, px = self.pc, self.px
+        full = self.tut is not None or (self.open and not s.mode)
+        tw = px(300 if full else 236)
         c.delete("all")
-        # header
-        status, col = (("PAUSED", AMBER) if self.t.paused else ("TRACKING", GREEN) if s.hands
-                       else ("SHOW YOUR HAND", AMBER))
-        c.create_text(px(14), px(20), text="◉ ZEHEN", anchor="w", fill=CYAN, font=self.font(14, True))
-        c.create_text(px(108), px(20), text=status, anchor="w", fill=col, font=self.font(10, True))
-        for i, (tag, label) in enumerate((("btn_pause", "▶" if self.t.paused else "⏸"),
-                                          ("btn_min", "+" if self.collapsed else "–"), ("btn_quit", "✕"))):
-            c.create_text(w - px(84 - i * 30), px(20), text=label, fill=CYAN, font=self.font(15, True), tags=tag)
-        h = px(40)
-        # an open launcher/pad needs the space: shrink to the header (unless the tutorial is talking)
-        if not (self.collapsed or (s.mode and self.tut is None)):
-            # wireframe hands: proof it's tracking, without showing any video. Main hand cyan, other green.
-            bx, by, bw, bh = px(14), px(44), w - px(28), px(130)
-            c.create_rectangle(bx, by, bx + bw, by + bh, outline=DARK)
-            fw = bh * 4 / 3  # camera is 4:3
-            X = lambda p: bx + (bw - fw) / 2 + p[0] * fw
-            Y = lambda p: by + p[1] * bh
-            for hand, line, dot in zip(s.hands, (DIM, "#1f8f5a"), (CYAN, GREEN)):
-                for a, b in HAND_LINKS:
-                    c.create_line(X(hand[a]), Y(hand[a]), X(hand[b]), Y(hand[b]), fill=line, width=px(2))
-                for p in hand:
-                    c.create_oval(X(p) - 3, Y(p) - 3, X(p) + 3, Y(p) + 3, fill=dot, outline="")
-            if not s.hands:
-                c.create_text(bx + bw / 2, by + bh / 2, text="raise your hand in front of the camera",
-                              fill=DIM, font=self.font(11))
-            y = by + bh + px(14)
-            h = self.draw_tutorial(c, y, w, now) if self.tut is not None else self.draw_guide(c, s, y, w)
-        self.panel.geometry(f"{w}x{h}+{self.W - w - px(16)}+{px(16)}")
+        mode = self.voice_mode(now)
+        label, detail, col = self.status(s, now)
+        # fluid size: the window eases toward its target instead of snapping, so opening and folding flow
+        if self.cw is None:
+            self.cw, self.ch = tw, px(46)
+        self.cw += (tw - self.cw) * 0.34
+        w = int(self.cw)
+        if full:
+            target_h = self.draw_full(c, s, now, w, label, col, mode)
+        else:  # the pill: one glass capsule, always there, says what you're showing it
+            target_h = px(46)
+            self.draw_wave(c, px(16), target_h / 2, mode, now, col, hands=bool(s.hands) or not self.t.camera_on)
+            c.create_text(px(58), target_h / 2 - (px(8) if detail else 0), text=label, anchor="w", fill=col,
+                          font=self.mono(12, True))
+            if detail:
+                c.create_text(px(58), target_h / 2 + px(9), text=detail[:30], anchor="w", fill=SUB, font=self.mono(9))
+            if mode == "working" and self.t.dl is not None:
+                c.create_rectangle(px(58), target_h - px(8), w - px(16), target_h - px(6), fill=DARK, outline="")
+                c.create_rectangle(px(58), target_h - px(8), px(58) + (w - px(74)) * self.t.dl, target_h - px(6),
+                                   fill=AMBER, outline="")
+        self.ch += (target_h - self.ch) * 0.34
+        h = int(self.ch)
+        if self.frosted:  # hairline rim, so the glass has an edge
+            self.chip(1, 1, w - 2, h - 2, px(23) if not full else px(16), fill="", outline=HAIR, state="disabled")
+        x0, y0 = self.W - w - px(16), px(16)
+        self.panel.geometry(f"{w}x{h}+{x0}+{y0}")
+        self.pill_bottom = y0 + h
+        self.dwell(now, w, h, x0, y0)
+
+    def dwell(self, now, w, h, x0, y0):
+        """Hands-free open and close: point at the pill for a moment and it opens; leave the open panel
+        alone for a few seconds and it folds back. (Glass pixels aren't clickable, so a real click can't open it.)"""
+        cx, cy = pyautogui.position()
+        over = x0 <= cx <= x0 + w and y0 <= cy <= y0 + h
+        if self.tut is not None or self.t.state.mode:
+            self.over_since = self.left_at = None
+            return
+        if not self.open:
+            self.armed = self.armed or not over
+            self.over_since = (self.over_since or now) if over and self.armed else None
+            if self.over_since and now - self.over_since > DWELL_S:
+                self.open, self.over_since, self.left_at = True, None, None
+        else:
+            self.left_at = None if over else (self.left_at or now)
+            if self.left_at and now - self.left_at > CLOSE_S:
+                self.open, self.left_at, self.armed = False, None, False
+
+    def draw_full(self, c, s, now, w, label, col, mode):
+        px, m = self.px, self.px(14)
+        # header: wordmark + live status, then camera, pause, fold and quit
+        c.create_oval(m, px(20), m + px(10), px(30), fill=col, outline="")
+        c.create_text(m + px(20), px(25), text="ZEHEN", anchor="w", fill=TEXT, font=self.mono(15, True))
+        c.create_text(m + px(76), px(26), text="// " + {"show your hand": "no hand", "voice only": "voice"}.get(label.lower(), label.lower())[:9],
+                      anchor="w", fill=col, font=self.mono(10, True))
+        cam = self.t.camera_on
+        x1 = w - m
+        for tag, glyph, ww, tint in (("btn_quit", "✕", 24, CYAN), ("btn_min", "–", 24, CYAN),
+                                     ("btn_pause", "▶" if self.t.paused else "❚❚", 24, CYAN),
+                                     ("btn_cam", "CAM" if cam else "CAM", 40, GREEN if cam else AMBER)):
+            self.chip(x1 - px(ww), px(13), x1, px(37), px(12), fill=CHIP, outline=tint if tag == "btn_cam" else HAIR, tags=tag)
+            c.create_text(x1 - px(ww) / 2, px(25), text=glyph, fill=tint, font=self.font(9 if tag == "btn_cam" else 11, True),
+                          tags=tag)
+            if tag == "btn_cam" and not cam:
+                c.create_line(x1 - px(ww) + px(6), px(31), x1 - px(6), px(19), fill=AMBER, width=px(2), tags=tag)
+            x1 -= px(ww + 6)
+        # wireframe hands: proof it's tracking, without any video. Main hand cyan, other green.
+        bx, by, bw, bh = m, px(48), w - 2 * m, px(84)
+        self.chip(bx, by, bx + bw, by + bh, px(12), fill=BG, outline=HAIR)
+        fw = bh * 4 / 3  # camera is 4:3
+        X = lambda p: bx + (bw - fw) / 2 + p[0] * fw
+        Y = lambda p: by + p[1] * bh
+        for hand, line, dot in zip(s.hands, (DIM, "#1f8f5a"), (CYAN, GREEN)):
+            for a, b in HAND_LINKS:
+                c.create_line(X(hand[a]), Y(hand[a]), X(hand[b]), Y(hand[b]), fill=line, width=px(2))
+            for p in hand:
+                c.create_oval(X(p) - 2, Y(p) - 2, X(p) + 2, Y(p) + 2, fill=dot, outline="")
+        if not s.hands:
+            c.create_text(bx + bw / 2, by + bh / 2, fill=DIM, font=self.mono(9),
+                          text="camera off: voice only" if not cam else "raise your hand in front of the camera")
+        y = by + bh + px(10)
+        y += self.draw_voice(c, y, w, now, mode)
+        return self.draw_tutorial(c, y, w, now) if self.tut is not None else self.draw_guide(c, s, y, w)
+
+    def draw_voice(self, c, y, w, now, mode):
+        """Voice chip: the live wave, what it is doing and a hint. Returns the height used."""
+        px, m, v = self.px, self.px(14), self.t.voice
+        label, col = {"loading": ("Starting", AMBER), "idle": ('Say "Zehen"', CYAN), "listening": ("Listening", GREEN),
+                      "working": ((self.t.reply or "Working").strip()[:26], AMBER), "speaking": ("Speaking", GREEN),
+                      "enrolling": ('Say "Zehen"', CYAN),
+                      "paused": ("Paused", AMBER), "off": ("Voice off", DIM)}[mode]
+        line = ("go ahead" if mode == "listening" else f"{4 - v.enroll_left} of 3" if mode == "enrolling" else
+                (v.error if v and mode == "off" else "")
+                or ("or point here and tap" if mode == "idle" else ""))
+        h = px(50)
+        self.chip(m, y, w - m, y + h, px(12), fill="#0a2e38", outline=col, tags="btn_voice")
+        self.draw_wave(c, m + px(16), y + h / 2, mode, now, col, tags="btn_voice")
+        c.create_text(m + px(58), y + (px(18) if line else h / 2), text=label, anchor="w", fill=col,
+                      font=self.font(13, True), tags="btn_voice")
+        if line:
+            c.create_text(m + px(58), y + px(36), text=line[:40], anchor="w", fill=SUB, font=self.mono(9), tags="btn_voice")
+        if mode == "working" and self.t.dl is not None:  # download bar along the bottom of the chip
+            c.create_rectangle(m + px(14), y + h - px(7), w - m - px(14), y + h - px(4), fill=DARK, outline="",
+                               state="disabled")
+            c.create_rectangle(m + px(14), y + h - px(7), m + px(14) + (w - 2 * m - px(28)) * self.t.dl, y + h - px(4),
+                               fill=AMBER, outline="", state="disabled")
+        used = h + px(8)
+        if llm_endpoint(self.t.cfg) is None:  # works offline without it; a free key makes it faster and smarter
+            c.create_text(m, y + used + px(11), text="free cloud key = faster", anchor="w", fill=SUB, font=self.mono(9))
+            for i, (tag, text) in enumerate((("btn_getkey", "Get key"), ("btn_pastekey", "Paste key"))):
+                x1 = w - m - i * px(74)
+                self.chip(x1 - px(68), y + used, x1, y + used + px(22), px(11), fill=CHIP, outline=HAIR, tags=tag)
+                c.create_text(x1 - px(34), y + used + px(11), text=text, fill=CYAN, font=self.font(9, True), tags=tag)
+            used += px(30)
+        return used
 
     def draw_tutorial(self, c, y, w, now):
-        px, great = self.px, now < self.great_until
+        px, great, m = self.px, now < self.great_until, self.px(14)
         if self.tut == len(TUTORIAL):
-            title, hint = "You're all set 🚀", "Open palm closes any panel. ⏸ pauses, ✕ quits."
+            title, hint = "You're all set 🚀", "Point at the pill to open this panel again."
         else:
             _, _, title, hint = TUTORIAL[self.tut]
-        c.create_text(px(14), y, text=f"TUTORIAL  {min(self.tut + 1, len(TUTORIAL))} / {len(TUTORIAL)}",
-                      anchor="nw", fill=DIM, font=self.font(10, True))
-        c.create_text(w - px(14), y, text="skip ›", anchor="ne", fill=DIM, font=self.font(10, True), tags="btn_skip")
-        c.create_text(px(14), y + px(22), text="✓ GREAT!" if great and self.tut < len(TUTORIAL) else title,
-                      anchor="nw", fill=GREEN if great else CYAN, font=self.font(17, True), width=w - px(28))
-        c.create_text(px(14), y + px(54), text=hint, anchor="nw", fill="#9fdce6", font=self.font(12),
-                      width=w - px(28))
+        self.chip(m, y, w - m, y + px(124), px(12), fill=CHIP, outline=GREEN if great else HAIR)
+        c.create_text(m + px(12), y + px(14), text=f"TUTORIAL {min(self.tut + 1, len(TUTORIAL))}/{len(TUTORIAL)}",
+                      anchor="w", fill=SUB, font=self.mono(9, True))
+        c.create_text(w - m - px(12), y + px(14), text="skip ›", anchor="e", fill=CYAN, font=self.mono(10, True),
+                      tags="btn_skip")
+        c.create_text(m + px(12), y + px(30), text="✓ GREAT!" if great and self.tut < len(TUTORIAL) else title,
+                      anchor="nw", fill=GREEN if great else CYAN, font=self.font(15, True), width=w - 2 * m - px(24))
+        c.create_text(m + px(12), y + px(58), text=hint, anchor="nw", fill="#9fdce6", font=self.font(11),
+                      width=w - 2 * m - px(24))
         for i in range(len(TUTORIAL)):  # progress dots
-            cx = px(18) + i * px(16)
-            c.create_oval(cx - 4, y + px(104) - 4, cx + 4, y + px(104) + 4, outline=CYAN,
+            cx = m + px(16) + i * px(15)
+            c.create_oval(cx - 4, y + px(108) - 4, cx + 4, y + px(108) + 4, outline=CYAN,
                           fill=CYAN if i < self.tut else "")
-        return y + px(120)
+        return y + px(138)
 
     def draw_guide(self, c, s, y, w):
-        px = self.px
-        c.create_text(w - px(14), y - px(4), text="tutorial ↻", anchor="ne", fill=DIM,
-                      font=self.font(10, True), tags="btn_tut")
-        y += px(16)
+        px, m = self.px, self.px(14)
+        c.create_text(m, y + px(6), text="GESTURES", anchor="w", fill=SUB, font=self.mono(9, True))
+        c.create_text(w - m, y + px(6), text="tutorial ↻", anchor="e", fill=CYAN, font=self.mono(9, True),
+                      tags="btn_tut")
+        y += px(18)
         for g, icon, how, what in GUIDE:
             on = g == s.active
+            if on:  # the row you're doing lights up and says what it does
+                self.chip(px(8), y, w - px(8), y + px(40), px(10), fill=DARK, outline=CYAN)
+            c.create_text(px(22), y + px(12), text=icon, anchor="w", fill=CYAN, font=self.font(13))
+            c.create_text(px(48), y + px(12), text=how, anchor="w", fill=CYAN if on else TEXT,
+                          font=self.font(11, True))
             if on:
-                c.create_rectangle(px(8), y - px(2), w - px(8), y + px(30), fill=DARK, outline=CYAN)
-            c.create_text(px(18), y + px(14), text=icon, anchor="w", fill=CYAN, font=self.font(15))
-            c.create_text(px(50), y + px(7), text=how, anchor="w", fill=CYAN if on else TEXT,
-                          font=self.font(12, True))
-            c.create_text(px(50), y + px(22), text=what, anchor="w", fill=DIM if not on else CYAN,
-                          font=self.font(10))
-            y += px(36)
-        return y + px(6)
+                c.create_text(px(48), y + px(29), text=what, anchor="w", fill="#9fdce6", font=self.mono(9))
+            y += px(40 if on else 25)
+        return y + px(8)
 
 
 def load_config():
@@ -1180,8 +2327,83 @@ def selftest():
     assert window_label("Instagram - Google Chrome") == "Google Chrome\nInstagram"
     assert window_label("Wikipédia — Mozilla Firefox") == "Mozilla Firefox\nWikipédia"
 
+    apps_q = [("Spotify", "a"), ("Notepad", "b")]
+    qc = lambda x: quick_command(x, apps_q)
+    assert qc("Scroll down") == ("Scrolling down", [{"scroll": "down 6"}])
+    assert qc("please scroll up a lot.") == ("Scrolling up", [{"scroll": "up 15"}])
+    assert qc("scrawl down")[1] == [{"scroll": "down 6"}] and qc("scroll dawn")[1] == [{"scroll": "down 6"}]
+    assert qc("Click.")[1] == [{"mouse": "click"}] and qc("quick")[1] == [{"mouse": "click"}]
+    assert qc("double click")[1] == [{"mouse": "double"}] and qc("right click")[1] == [{"mouse": "right"}]
+    assert qc("go back")[1] == [{"press": "alt+left"}] and qc("Zoom in")[1] == [{"zoom": "in"}]
+    assert qc("down") is None and qc("turn it up")[1] == [{"volume": "up"}]  # a stray "down" is not a command
+    assert qc("volume down")[1] == [{"volume": "down"}] and qc("pause")[1] == [{"media": "playpause"}]
+    assert qc("open spotify")[1] == [{"open_app": "Spotify"}] and qc("open the unknown thing") is None
+    assert qc("open YouTube")[1] == [{"open_url": "https://www.youtube.com"}]  # a site, not an app
+    assert qc("open google.com")[1] == [{"open_url": "https://google.com"}] and qc("go to github")[1][0]["open_url"]
+    assert qc("click on trending")[1] == [{"click": "trending"}]
+    assert qc("open youtube and click on trending")[1] == [{"open_url": "https://www.youtube.com"}, {"wait": "3.5"},
+                                                         {"click": "trending"}]
+    assert qc("type cats and dogs")[1] == [{"type": "cats and dogs"}]  # "and" inside a request stays inside
+    assert qc("Type Hello World.")[1] == [{"type": "Hello World"}]
+    assert qc("write a note saying buy milk in notepad") is None  # too much for a shortcut: the AI plans it
+    assert qc("what time is it")[1] == [] and qc("what time is it")[0].startswith("It's ")
+    assert qc("what is the weather") is None and qc("move my downloads to d drive") is None  # these need the AI
+    say, acts, done = parse_plan('Sure!\n```json\n{"say": "Opening Spotify", "do": [{"open_app": "Spotify"}, {"rm": "x"}, '
+                                 '{"type": 5}, {"press": "ctrl+t", "x": "y"}, "junk"]}\n```')
+    assert (say, acts, done) == ("Opening Spotify", [{"open_app": "Spotify"}], True), (say, acts)  # bad actions dropped
+    assert parse_plan("just chatting") == ("just chatting", [], True)
+    bad = '<think>\n\n</think>\n{"say": "Opening the desktop folder...","do":[{"open_app", "File Explorer"}], "done": true}'
+    assert parse_plan(bad) == ("Opening the desktop folder...", [{"open_app": "File Explorer"}], True), parse_plan(bad)
+    assert parse_plan("{ nonsense }")[0].startswith("Sorry") and "{" not in parse_plan('{"x": [1,')[0]  # never raw JSON
+    assert qc("open my desktop folder")[1] == [{"open_folder": "desktop"}] and qc("show downloads")[1][0]["open_folder"]
+    assert parse_plan('{"say": "x", "do": [{"powershell": "dir"}], "done": false}')[2] is False
+    assert len(parse_plan('{"do": [' + ", ".join(['{"type": "a"}'] * 8) + "]}")[1]) == 5
+    assert run_powershell("Write-Output hello") == "hello"
+    fake = SimpleNamespace(tokenizer=SimpleNamespace(phonemize=lambda t, lang: f"<{lang}:{t.strip()}>"))
+    assert tts_phonemes(fake, "I'm Noor. Say Zehen!") == "<en-us:I'm> <hi:नूर> <en-us:. Say> <hi:ज़ेहेन> <en-us:!>"
+    assert run_powershell("Start-Sleep 5", timeout=1).startswith("(timed out")
+    assert llm_endpoint({}) is None or os.environ.get("ZEHEN_API_KEY")
+    assert llm_endpoint({"llm": {"api_key": "AIza" + "x" * 30}})[0].startswith("https://generativelanguage")
+    assert llm_endpoint({"llm": {"api_key": "gsk_" + "x" * 30, "model": "m"}})[1] == "m"  # config overrides defaults
+
     t = Tracker(None, {}, start=False)  # every panel lays out, every tile fits on screen
     t.apps = apps
+    sent, real_hot, real_open = [], pyautogui.hotkey, webbrowser.open
+    pyautogui.hotkey, webbrowser.open = lambda *k: sent.append(k), lambda u: sent.append(u)
+    for kind, v in (("press", "ctrl+t"), ("press", "win+r"), ("press", "rm -rf"), ("open_url", "file:///c:/x"),
+                    ("open_url", "https://example.com"), ("window", "format")):
+        t._do(kind, v)
+    pyautogui.hotkey, webbrowser.open = real_hot, real_open
+    assert sent == [("ctrl", "t"), ("win", "r"), "https://example.com"], sent  # no file:// links, no invented keys
+    script = iter(['{"say": "Checking", "do": [{"powershell": "Write-Output 42"}], "done": false}',
+                   '{"say": "It is 42", "do": [], "done": true}'])
+    seen, real_chat = [], chat
+    globals()["chat"] = lambda cfg, msgs, note=None: (seen.append(msgs[-1]["content"]), next(script))[1]
+    try:
+        assert t._agent("what is the answer") == "It is 42"
+    finally:
+        globals()["chat"] = real_chat
+    assert seen[1] == "Output:\n42", seen  # the model got to see what its command printed
+    real_save = save_config
+    globals()["save_config"] = lambda c: None  # the test must not touch your real settings
+    try:
+        assert t._agent("turn off the camera").startswith("Camera off") and not t.camera_on
+        assert t._agent("camera on").startswith("Camera on") and t.camera_on
+    finally:
+        globals()["save_config"] = real_save
+    tone = lambda f0, f1: (np.sin(np.cumsum(np.linspace(f0, f1, 9600)) * 2 * np.pi / 16000) * 12000).astype(np.int16).tobytes()
+    a1, a2, b1 = mfcc(tone(300, 900)), mfcc(tone(310, 880)), mfcc(tone(1500, 400))
+    assert dtw(a1, a2)[0] < dtw(a1, b1)[0] * 0.6  # the same sweep matches itself far better than a different one
+    sent2 = []
+    real_io = pyautogui.scroll, pyautogui.click, pyautogui.press
+    pyautogui.scroll, pyautogui.click, pyautogui.press = (lambda n: sent2.append(("scroll", n)),
+                                                            lambda: sent2.append("click"),
+                                                            lambda k, **kw: sent2.append(("press", k)))
+    for kind, v in (("scroll", "down 6"), ("scroll", "up"), ("scroll", "bottom"), ("mouse", "click"), ("mouse", "bogus")):
+        t._do(kind, v)
+    pyautogui.scroll, pyautogui.click, pyautogui.press = real_io
+    k = 120 if sys.platform == "win32" else 1
+    assert sent2 == [("scroll", -6 * k), ("scroll", 6 * k), ("press", "end"), "click"], sent2
     for mode, search in (("launcher", False), ("pad", False), ("pad", True), ("keyboard", False)):
         t.set_mode(mode, search)
         t.query = "spot"
@@ -1224,6 +2446,7 @@ def selftest():
         th.join(20)
         assert len(got) == 3 and all("oil" in [c.lower() for c in cands] for cands in got), got
         assert list_windows() is not None
+        assert isinstance(ui_list(), str)  # UI Automation answers (whatever window is in front)
     make_detector()  # model + mediapipe binaries load (catches broken .exe bundles)
     print("selftest ok")
 

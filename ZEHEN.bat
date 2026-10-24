@@ -14,7 +14,7 @@ if not defined PY (
   pause
   exit /b 1
 )
-"%PY%" -c "import importlib.util as u, sys; sys.exit(any(u.find_spec(m) is None for m in ('mediapipe', 'cv2', 'pyautogui', 'winrt.windows.ui.input.inking')))" 2>nul
+"%PY%" -c "import importlib.util as u, sys; sys.exit(any(u.find_spec(m) is None for m in ('mediapipe', 'cv2', 'pyautogui', 'winrt.windows.ui.input.inking', 'vosk', 'sounddevice', 'kokoro_onnx', 'uiautomation')))" 2>nul
 if errorlevel 1 (
   echo First run: installing ZEHEN's libraries, this takes a minute...
   "%PY%" -m pip install -r requirements.txt || (pause & exit /b 1)
