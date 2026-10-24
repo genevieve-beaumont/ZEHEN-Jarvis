@@ -429,9 +429,12 @@ WAKE_LIKE = {"zane", "zen", "zain", "zayn", "the", "then", "this", "he", "hes", 
              "saint", "zayed", "hey", "a", "is"}  # what Vosk's full vocabulary writes for "Zehen": the second opinion
 # a key's prefix says which free service it's from; any OpenAI-compatible endpoint also works via "llm" in the config.
 # Free tiers change (Groq dropped Llama 3.3 from its free plan in 2026): override "model" in the config if one goes
-PROVIDERS = {"gsk_": ("https://api.groq.com/openai/v1", "openai/gpt-oss-120b"),
-             "AIza": ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-flash-latest"),
-             "sk-or-": ("https://openrouter.ai/api/v1", "openrouter/free")}
+PROVIDER_DEFAULTS = {"Groq": ("https://api.groq.com/openai/v1", "openai/gpt-oss-120b"),
+                     "Gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-flash-latest"),
+                     "OpenRouter": ("https://openrouter.ai/api/v1", "openrouter/free"),
+                     "OpenAI": ("https://api.openai.com/v1", "gpt-4o-mini")}
+KEY_PREFIXES = [("gsk_", "Groq"), ("AIza", "Gemini"), ("sk-or-", "OpenRouter"), ("sk-", "OpenAI")]  # longest first
+PROVIDER_NAMES = ["Auto-detect", *PROVIDER_DEFAULTS, "Custom"]  # Custom: any OpenAI-compatible service
 KEY_PAGE = "https://console.groq.com/keys"
 ASK_SYSTEM = """You are NOOR, the voice assistant that runs this Windows PC for its owner, and you also just talk with them.
 Speak the way a warm, quick, dry-witted person does: natural sentences, contractions, no lists, no markdown, no emoji.
@@ -554,8 +557,45 @@ def llm_endpoint(cfg):
     key = c.get("api_key") or os.environ.get("ZEHEN_API_KEY", "")
     if not key:
         return None
-    url, model = next((v for p, v in PROVIDERS.items() if key.startswith(p)), PROVIDERS["gsk_"])
-    return c.get("base_url", url), c.get("model", model), key
+    url, model = PROVIDER_DEFAULTS.get(provider_of(key, c), PROVIDER_DEFAULTS["Groq"])
+    return c.get("base_url") or url, c.get("model") or model, key
+
+
+def provider_of(key, llm=None):
+    """Which service a key belongs to: the one you picked, else its prefix, else None."""
+    chosen = (llm or {}).get("provider", "")
+    return chosen if chosen in PROVIDER_DEFAULTS else next((n for p, n in KEY_PREFIXES if key.startswith(p)), None)
+
+
+def verify_key(key, provider="Auto-detect", base_url="", model=""):
+    """Ask the service one tiny question with this key. {ok, message, provider, base_url, model}: never raises."""
+    name = provider if provider in PROVIDER_DEFAULTS else (provider_of(key) if provider == "Auto-detect" else None)
+    url, mdl = PROVIDER_DEFAULTS.get(name, ("", ""))
+    url, mdl = (base_url or url).strip(), (model or mdl).strip()
+    label = name or "this service"
+    out = {"ok": False, "provider": name or "Custom", "base_url": url, "model": mdl}
+    if not url or not mdl:
+        out["message"] = ("Couldn't tell which service that key is for. Pick one from the list, or choose Custom and "
+                          "enter its address and model.")
+        return out
+    req = urllib.request.Request(url.rstrip("/") + "/chat/completions", json.dumps(
+        {"model": mdl, "max_tokens": 8, "messages": [{"role": "user", "content": "Reply with the single word OK"}]}
+    ).encode(), {"Content-Type": "application/json", "Authorization": "Bearer " + key, "User-Agent": "ZEHEN"})
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            json.load(r)["choices"][0]
+        out.update(ok=True, message=f"Verified: {label} answered with {mdl}.")
+    except urllib.error.HTTPError as e:
+        out["message"] = {401: f"{label} rejected this key.", 403: f"{label} rejected this key.",
+                          404: f"The key may be fine, but {label} has no model called '{mdl}'. Set another.",
+                          429: ""}.get(e.code, f"{label} replied with error {e.code}.")
+        if e.code == 429:  # a valid key that is out of free requests for now
+            out.update(ok=True, message=f"Verified: {label} knows this key (free limit reached for the moment).")
+    except (urllib.error.URLError, TimeoutError, OSError):
+        out["message"] = "Couldn't reach the service. Check your connection and the address."
+    except (KeyError, ValueError, IndexError):
+        out["message"] = f"{label} answered, but not in the OpenAI format. Is the address right?"
+    return out
 
 
 def parse_plan(text):
@@ -724,29 +764,41 @@ def quick_command(text, apps):
     return None
 
 
+def _chat_local(messages, note):
+    last = {**messages[-1], "content": messages[-1]["content"] + " /no_think"}  # Qwen3: skip the long thinking
+    with _local_lock:
+        out = local_llm(note).create_chat_completion(  # json_object: the decoder can only write valid JSON
+            messages=messages[:-1] + [last], max_tokens=300, temperature=0.1, response_format={"type": "json_object"})
+    return out["choices"][0]["message"]["content"]
+
+
 def chat(cfg, messages, note=lambda s, frac=None: None):
-    """One model call: the free cloud key if there is one, else the offline model. Raises RuntimeError."""
+    """One model call: the free cloud key if there is one, else the offline model. A key that is missing, rejected,
+    out of free requests or offline never leaves her speechless: she falls back to the offline brain."""
     ep = llm_endpoint(cfg)
     if not ep:
-        last = {**messages[-1], "content": messages[-1]["content"] + " /no_think"}  # Qwen3: skip the long thinking
-        with _local_lock:
-            out = local_llm(note).create_chat_completion(  # json_object: the decoder can only write valid JSON
-                messages=messages[:-1] + [last], max_tokens=300, temperature=0.1, response_format={"type": "json_object"})
-        return out["choices"][0]["message"]["content"]
+        return _chat_local(messages, note)
     url, model, key = ep
     req = urllib.request.Request(url.rstrip("/") + "/chat/completions", json.dumps(
         {"model": model, "temperature": 0.1, "max_tokens": 600, "messages": messages}).encode(), {
         "Content-Type": "application/json", "Authorization": "Bearer " + key,
         "User-Agent": "ZEHEN"})  # Cloudflare in front of some providers rejects Python's default agent
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.load(r)["choices"][0]["message"]["content"]
-    except urllib.error.HTTPError as e:
-        raise RuntimeError({401: "key rejected: paste a new one", 403: "key rejected: paste a new one",
-                            404: "that model is gone: set another in .zehen.json",
-                            429: "free limit reached: try again in a minute"}.get(e.code, f"AI error {e.code}"))
-    except (urllib.error.URLError, TimeoutError, KeyError, ValueError):
-        raise RuntimeError("couldn't reach the AI: check your connection")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.load(r)["choices"][0]["message"]["content"]
+        except urllib.error.HTTPError as e:
+            raise RuntimeError({401: "key rejected: paste a new one", 403: "key rejected: paste a new one",
+                                404: "that model is gone: set another in .zehen.json",
+                                429: "free limit reached"}.get(e.code, f"AI error {e.code}"))
+        except (urllib.error.URLError, TimeoutError, KeyError, ValueError):
+            raise RuntimeError("couldn't reach the AI")
+    except RuntimeError as cloud_error:
+        note(f"{cloud_error}. Using my offline brain.")
+        try:
+            return _chat_local(messages, note)
+        except RuntimeError:
+            raise cloud_error  # no offline brain either: say what went wrong with the key
 
 
 def run_powershell(cmd, timeout=30):
@@ -1619,7 +1671,16 @@ class Tracker:
         if self.voice and re.search(r"\b(?:learn|train|teach|retrain|calibrate|recalibrate)\b.*\bvoice\b", fold(text)):
             self.voice.enroll()
             return "Say Zehen, three times, with a short pause between each."
+        fresh = load_config()  # the file is the truth: delete the key there and the next request is offline
+        if "llm" in fresh:
+            self.cfg["llm"] = fresh["llm"]
+        else:
+            self.cfg.pop("llm", None)
         t = " ".join(re.sub(r"[^\w\s']", " ", text.lower()).split())
+        if re.fullmatch(r"(?:remove|delete|forget|clear|drop) (?:my |the |your )?(?:api )?key|(?:use|go) (?:the )?(?:offline|local)(?: brain| mode)?", t):
+            self.cfg.pop("llm", None)
+            save_config(self.cfg)
+            return "Key removed. I'm using my offline brain now."
         if t in ("stop", "shut up", "be quiet", "quiet", "silence", "stop talking", "enough", "that's enough", "hush",
                  "never mind", "nevermind", "cancel that", "cancel"):
             if self.voice:
@@ -1730,11 +1791,14 @@ class Tracker:
     def _paste_key(self):
         key = clipboard_text()
         if len(key) < 20 or " " in key or "\n" in key:
-            self._say("Copy your key first, then tap Paste key")
+            self._say("Copy your key first, then say: paste my key")
             return
-        self.cfg.setdefault("llm", {})["api_key"] = key
-        save_config(self.cfg)
-        self._say("Key saved. Say: Zehen, open Spotify.")
+        self._say("Checking the key…")
+        res = verify_key(key)
+        if res["ok"]:
+            self.cfg["llm"] = {"api_key": key, "provider": res["provider"], "verified": True}
+            save_config(self.cfg)
+        self._say(res["message"])
 
     def _enter(self):
         if self.search:
@@ -1915,6 +1979,7 @@ class HUD:
                         ("btn_quit", self.quit), ("btn_tut", self.restart_tutorial), ("btn_skip", self.skip_tutorial),
                         ("btn_voice", lambda: self.t.voice and self.t.voice.listen_now()),
                         ("btn_cam", lambda: self.t.set_camera(not self.t.camera_on)),
+                        ("btn_addkey", lambda: self.open_key_dialog()),
                         ("btn_getkey", lambda: webbrowser.open(KEY_PAGE)),
                         ("btn_pastekey", lambda: threading.Thread(target=self.t._paste_key, daemon=True).start())):
             self.pc.tag_bind(tag, "<Button-1>", lambda e, fn=fn: fn())
@@ -1939,6 +2004,100 @@ class HUD:
     def toggle_open(self):
         self.open = not self.open
         self.armed = False  # pointing at the pill that just closed must not reopen it: leave first
+
+    def open_key_dialog(self):
+        """A small window with a box to paste any AI key into, a Verify button that really asks the service, and
+        a way to remove the key again. Any OpenAI-compatible service works: pick Custom and give its address."""
+        from tkinter import ttk
+        if getattr(self, "keywin", None) is not None and self.keywin.winfo_exists():
+            return self.keywin.lift()
+        win = self.keywin = tk.Toplevel(self.root)
+        win.title("ZEHEN: AI key")
+        win.configure(bg=BG, padx=22, pady=18)
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        lab = lambda text, **kw: tk.Label(win, text=text, bg=BG, fg=kw.pop("fg", SUB), font=("Segoe UI", 10), anchor="w", **kw)
+        lab("Paste an API key from Groq, Gemini, OpenRouter, OpenAI or any OpenAI-compatible service.",
+            fg=TEXT).grid(row=0, column=0, columnspan=3, sticky="w")
+        lab("Free keys: console.groq.com/keys  or  aistudio.google.com/apikey").grid(row=1, column=0, columnspan=3,
+                                                                                    sticky="w", pady=(0, 10))
+        key = tk.StringVar()
+        box = tk.Entry(win, textvariable=key, width=52, show="\u2022", bg=TILE, fg=TEXT, insertbackground=CYAN,
+                       relief="flat", font=("Consolas", 11), highlightthickness=1, highlightbackground=DIM,
+                       highlightcolor=CYAN)
+        box.grid(row=2, column=0, columnspan=2, sticky="we", ipady=6)
+        btn = lambda text, cmd, **kw: tk.Button(win, text=text, command=cmd, bg=CHIP, fg=kw.pop("fg", CYAN), relief="flat",
+                                                activebackground=DARK, activeforeground=CYAN, padx=12, pady=4,
+                                                font=("Segoe UI", 10, "bold"), cursor="hand2", **kw)
+        def paste():
+            try:
+                key.set(win.clipboard_get().strip())
+            except tk.TclError:
+                status.config(text="The clipboard is empty: copy your key first.", fg=AMBER)
+        btn("Paste", paste).grid(row=2, column=2, padx=(8, 0))
+        show = tk.IntVar()
+        tk.Checkbutton(win, text="show key", variable=show, bg=BG, fg=SUB, selectcolor=BG, activebackground=BG,
+                       activeforeground=SUB, command=lambda: box.config(show="" if show.get() else "\u2022")
+                       ).grid(row=3, column=0, sticky="w", pady=(4, 0))
+        lab("Service").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        who = tk.StringVar(value="Auto-detect")
+        pick = ttk.Combobox(win, textvariable=who, values=PROVIDER_NAMES, state="readonly", width=18)
+        pick.grid(row=5, column=0, sticky="w")
+        url, mdl = tk.StringVar(), tk.StringVar()
+        custom = tk.Frame(win, bg=BG)
+        for r, (name, var) in enumerate((("Address (ends in /v1)", url), ("Model", mdl))):
+            tk.Label(custom, text=name, bg=BG, fg=SUB, font=("Segoe UI", 9)).grid(row=r, column=0, sticky="w")
+            tk.Entry(custom, textvariable=var, width=44, bg=TILE, fg=TEXT, insertbackground=CYAN, relief="flat",
+                     font=("Consolas", 10)).grid(row=r, column=1, padx=8, pady=2, ipady=3)
+        pick.bind("<<ComboboxSelected>>", lambda e: custom.grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
+                  if who.get() == "Custom" else custom.grid_remove())
+        saved = self.cfg.get("llm", {})
+        status = tk.Label(win, bg=BG, fg=GREEN if saved.get("api_key") else SUB, font=("Segoe UI", 10), anchor="w",
+                          wraplength=470, justify="left",
+                          text="A key is saved and verified." if saved.get("verified") else
+                          "A key is saved." if saved.get("api_key") else "No key yet: ZEHEN uses its offline brain.")
+        status.grid(row=7, column=0, columnspan=3, sticky="w", pady=(12, 8))
+        bar = tk.Frame(win, bg=BG)
+        bar.grid(row=8, column=0, columnspan=3, sticky="we")
+
+        def verify():
+            k = key.get().strip()
+            if not k:
+                return status.config(text="Paste a key first.", fg=AMBER)
+            status.config(text="Asking the service…", fg=AMBER)
+            go.config(state="disabled")
+            args = (k, who.get(), url.get(), mdl.get())
+
+            def work():
+                res = verify_key(*args)
+                win.after(0, lambda: done(k, res))
+            threading.Thread(target=work, daemon=True).start()
+
+        def done(k, res):
+            go.config(state="normal")
+            status.config(text=res["message"], fg=GREEN if res["ok"] else "#ff6b6b")
+            if res["ok"]:  # verified: keep it, and the next request already uses it
+                llm = {"api_key": k, "provider": res["provider"], "verified": True}
+                if who.get() == "Custom" or url.get().strip() or mdl.get().strip():
+                    llm.update(base_url=res["base_url"], model=res["model"])
+                self.cfg["llm"] = llm
+                save_config(self.cfg)
+                self.t._say(f"{res['provider']} key verified.")
+                win.after(1600, win.destroy)
+
+        def remove():
+            self.cfg.pop("llm", None)
+            save_config(self.cfg)
+            status.config(text="Key removed. ZEHEN is using its offline brain.", fg=GREEN)
+            self.t._say("Key removed. Using my offline brain.")
+        go = btn("Verify and save", verify)
+        go.pack(in_=bar, side="left")
+        btn("Remove key", remove, fg=AMBER).pack(in_=bar, side="left", padx=8)
+        btn("Close", win.destroy, fg=SUB).pack(in_=bar, side="right")
+        box.focus_set()
+        win.bind("<Return>", lambda e: verify())
+        win.update_idletasks()
+        win.geometry(f"+{(self.W - win.winfo_width()) // 2}+{(self.H - win.winfo_height()) // 3}")
 
     def restart_tutorial(self):
         self.tut, self.step_start, self.spoken = 0, time.monotonic(), None
@@ -2240,13 +2399,17 @@ class HUD:
             c.create_rectangle(m + px(14), y + h - px(7), m + px(14) + (w - 2 * m - px(28)) * self.t.dl, y + h - px(4),
                                fill=AMBER, outline="", state="disabled")
         used = h + px(8)
-        if llm_endpoint(self.t.cfg) is None:  # works offline without it; a free key makes it faster and smarter
-            c.create_text(m, y + used + px(11), text="free cloud key = faster", anchor="w", fill=SUB, font=self.mono(9))
-            for i, (tag, text) in enumerate((("btn_getkey", "Get key"), ("btn_pastekey", "Paste key"))):
-                x1 = w - m - i * px(74)
-                self.chip(x1 - px(68), y + used, x1, y + used + px(22), px(11), fill=CHIP, outline=HAIR, tags=tag)
-                c.create_text(x1 - px(34), y + used + px(11), text=text, fill=CYAN, font=self.font(9, True), tags=tag)
-            used += px(30)
+        ep, saved = llm_endpoint(self.t.cfg), self.t.cfg.get("llm", {})
+        brain = ("Offline brain" if not ep else
+                 f"{provider_of(ep[2], saved) or 'Custom'} key" + (" verified" if saved.get("verified") else ""))
+        c.create_text(m, y + used + px(11), text=brain[:22], anchor="w", fill=GREEN if ep else SUB, font=self.mono(9))
+        x1 = w - m
+        for tag, text in ((("btn_addkey", "Change key"),) if ep else (("btn_addkey", "Add key"), ("btn_getkey", "Get key"))):
+            ww = px(78 if text == "Change key" else 66)
+            self.chip(x1 - ww, y + used, x1, y + used + px(22), px(11), fill=CHIP, outline=HAIR, tags=tag)
+            c.create_text(x1 - ww / 2, y + used + px(11), text=text, fill=CYAN, font=self.font(9, True), tags=tag)
+            x1 -= ww + px(6)
+        used += px(30)
         return used
 
     def draw_tutorial(self, c, y, w, now):
@@ -2476,6 +2639,41 @@ def selftest():
     assert qc("Type Hello World.")[1] == [{"type": "Hello World"}]
     assert qc("write a note saying buy milk in notepad") is None  # too much for a shortcut: the AI plans it
     assert "NOTFOUND" in qc("open jupyter notebook")[1][0]["powershell"] and qc("jupiter notebook")[1] and qc("install jupyter")[1]
+    class Fake429(urllib.error.HTTPError):
+        def __init__(self): super().__init__("u", 429, "limit", {}, None)
+    real_open, real_local = urllib.request.urlopen, globals()["local_llm"]
+    reply_obj = SimpleNamespace(create_chat_completion=lambda **kw: {"choices": [{"message": {"content": "offline answer"}}]})
+    def dead(*a, **k): raise Fake429()
+    urllib.request.urlopen = dead
+    globals()["local_llm"] = lambda note=None, load=True: reply_obj
+    try:
+        keyed = {"llm": {"api_key": "gsk_" + "x" * 30}}
+        assert chat(keyed, [{"role": "user", "content": "hi"}]) == "offline answer"  # rate-limited key: offline takes over
+        assert chat({}, [{"role": "user", "content": "hi"}]) == "offline answer"      # no key at all: offline
+    finally:
+        urllib.request.urlopen, globals()["local_llm"] = real_open, real_local
+    import io as _io
+    class Resp(_io.BytesIO):
+        __enter__ = lambda self: self
+        __exit__ = lambda self, *a: False
+    seen_urls = []
+    def fake_open(req, timeout=0):
+        seen_urls.append(req.full_url)
+        if "bad" in req.headers.get("Authorization", ""):
+            raise urllib.error.HTTPError(req.full_url, 401, "no", {}, None)
+        return Resp(b'{"choices": [{"message": {"content": "OK"}}]}')
+    urllib.request.urlopen = fake_open
+    try:
+        good = verify_key("AIza" + "x" * 30)
+        assert good["ok"] and good["provider"] == "Gemini" and "generativelanguage" in seen_urls[-1], good
+        assert verify_key("sk-" + "x" * 30)["provider"] == "OpenAI" and verify_key("sk-or-" + "x" * 20)["provider"] == "OpenRouter"
+        assert not verify_key("gsk_bad")["ok"] and "rejected" in verify_key("gsk_bad")["message"]
+        unk = verify_key("mystery-key-123")
+        assert not unk["ok"] and "Pick one" in unk["message"]  # can't guess: asks, doesn't send the key anywhere
+        cust = verify_key("anything", "Custom", "https://api.together.xyz/v1", "meta-llama/Llama-3-8b")
+        assert cust["ok"] and seen_urls[-1].startswith("https://api.together.xyz/v1/chat/completions")
+    finally:
+        urllib.request.urlopen = real_open
     quiet_t = Tracker(None, {}, start=False)
     assert quiet_t._agent("thank you") == "" and quiet_t._agent("okay") == ""  # pleasantries: silence, not a chat
     names = ["SEM7_ML_PB_2026_TEST-2.pdf", "API Keys - GroqCloud", "(908) YouTube"]
