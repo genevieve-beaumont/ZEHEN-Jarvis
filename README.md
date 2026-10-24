@@ -78,7 +78,11 @@ cd ZEHEN
 first time, Noor introduces herself, sets up her own brain (a one-time download, shown with a progress bar) and
 walks you through every gesture out loud, step by step, then learns your wake word. To quit, use the close button on the panel.
 
-First run downloads a few models once into `%USERPROFILE%\.zehen`:
+The first run shows a **setup checklist** in the panel and fetches everything ZEHEN needs: Python packages, the
+hand model, the wake-word ear, Noor's voice, the hearing model and the offline brain. Anything already on the PC
+is skipped ("ready"), anything missing is downloaded with a progress bar, and a failure is shown and retried on
+the next launch. Run `python zehen.py --setup` to do the same from a terminal, or say "run setup". Models go to
+`%USERPROFILE%\.zehen`:
 
 | Model | Size | Used for | License |
 |---|---|---|---|
@@ -136,6 +140,16 @@ Her name is Noor. She greets you when ZEHEN starts, then listens for one word.
 6. **Answer.** She says what she did in a natural voice, so you never need to look at the screen. Ask her a
    question and she answers like a person, remembers the last few things you said, and keeps listening for your
    reply without needing the wake word again.
+
+**Videos.** "Play the first video" clicks the first video on the page in front (ads skipped); "play the third one";
+"play Jaan-E-Jaan" plays that title if it is on screen, otherwise searches YouTube and plays the top result;
+"play lo-fi beats on YouTube" does the same on purpose. It reads the page through UI Automation, so it works in
+any browser.
+
+**Typing by voice.** Say "click on the search bar" (or "message box", "address bar") and she puts the cursor there
+and says "Ready to type." From then on, what you say is typed as you say it, with Whisper's punctuation and
+capitals, and no wake word needed. Say "new line", "delete that", "send" (presses Enter and ends), or "stop typing".
+Works in any app with a text box.
 
 **Instant commands, no AI.** "Scroll down", "scroll up a lot", "click", "double click", "right click",
 "go back", "new tab", "copy", "paste", "zoom in", "volume down", "pause", "close window", "type hello",

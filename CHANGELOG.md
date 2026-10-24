@@ -25,6 +25,13 @@ All notable changes to ZEHEN. Format: [Keep a Changelog](https://keepachangelog.
 - Fluid glass pill: a live waveform follows your voice, replies appear as a small caption under it, panel size
   eases instead of snapping, and every panel button now responds to clicks
 - Funnier, still professional greetings
+- First-run setup checklist: packages, hand model, wake-word ear, voice, hearing and brain, each skipped when
+  already on the PC, downloaded with progress when missing, retried next launch if it failed.
+  `python zehen.py --setup` runs it from a terminal
+- "Play the first video", "play <title>" and "play <anything> on YouTube" click the right video through UI
+  Automation (ads skipped), searching YouTube when the title is not on the page
+- "Click on the search bar" (or any text box) says "Ready to type" and starts dictation: what you say is typed
+  with punctuation until you say "stop typing" or "send"
 - Hearing: Whisper on the PC transcribes what you say (accent-tolerant, knows your app and window names, 0.4 s),
   with the wake-word model as a backup transcript; mishearings like "like" for "click" are recovered, one stray
   word is ignored, and the language model is told the request came from speech
