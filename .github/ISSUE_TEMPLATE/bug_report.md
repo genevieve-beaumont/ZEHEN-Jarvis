@@ -1,6 +1,6 @@
 ---
-name: 🐛 Bug report
-about: A gesture misfires, the camera won't start, something crashes
+name: Bug report
+about: A gesture misfires, Noor mishears, the camera won't start, something crashes
 labels: bug
 ---
 

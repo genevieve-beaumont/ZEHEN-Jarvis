@@ -1,5 +1,5 @@
 ---
-name: 💡 Feature request
+name: Feature request
 about: A new gesture, panel, or movie-style idea
 labels: enhancement
 ---

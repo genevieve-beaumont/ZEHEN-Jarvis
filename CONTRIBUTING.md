@@ -1,16 +1,16 @@
 # Contributing to ZEHEN
 
-Thanks for wanting to help build the interface from the movies. Every gesture idea, bug report and
+Thanks for wanting to help build the interface from the films. Every gesture idea, bug report and
 pull request makes ZEHEN better.
 
 ## Ways to help
 
-- 🐛 **Report a bug**: [open an issue](../../issues/new?template=bug_report.md). Say what you did, what
+- **Report a bug**: [open an issue](../../issues/new?template=bug_report.md). Say what you did, what
   happened, and paste the output of `python zehen.py --test`.
-- 💡 **Suggest a feature**: [feature request](../../issues/new?template=feature_request.md). Movie
+- **Suggest a feature**: [feature request](../../issues/new?template=feature_request.md). Movie
   references welcome. Check the [roadmap](ROADMAP.md) first.
-- 🧪 **Test on your hardware**: different cameras, lighting and screens find the best bugs.
-- 🛠️ **Send code**: pick something from the roadmap or an issue labelled `good first issue`.
+- **Test on your hardware**: different cameras, lighting and screens find the best bugs.
+- **Send code**: pick something from the roadmap or an issue labelled `good first issue`.
 
 ## Set up
 
@@ -31,9 +31,10 @@ Everything lives in `zehen.py`, top to bottom:
 | Tuning knobs | Every sensitivity value, with a comment saying which way to turn it |
 | `classify()` | Turns 21 hand landmarks into a gesture name |
 | `OneEuro` | Cursor smoothing: steady when still, fast when moving |
-| Windows helpers | Open windows, installed apps, handwriting recognition |
+| Windows helpers | Open windows, installed apps, handwriting recognition, UI Automation (`ui_list`, `ui_click`) |
+| Voice | `PROVIDERS`, `chat()` (cloud or offline model), `parse_plan()`, `run_powershell()`, `Voice` (wake word, hearing, speaking) |
 | `Tracker` | Camera loop on a background thread: gestures → actions; builds panel layouts |
-| `HUD` | Tk overlay and guide panel; draws whatever `Tracker.state` says |
+| `HUD` | Tk overlay and the glass pill/panel; draws whatever `Tracker.state` says |
 | Camera setup | Permission screen, finding a live camera |
 | `selftest()` | Checks you can run without a camera |
 
