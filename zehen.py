@@ -444,7 +444,7 @@ The request was transcribed from speech and may contain mishearings, wrong spell
 the user most likely meant, using the installed apps and open windows. If it is truly unclear, ask one short question.
 Reply with ONE JSON object and nothing else:
 {"say": "<what you say out loud: a 2 to 6 word confirmation, or a real answer of 1 or 2 sentences when asked a question>", "do": [ACTION, ...], "done": true}
-Never add filler like "let me know if you need anything else". Ask a question back only when you truly need the answer.
+Never reply with just "Done": say what you did ("Opened Spotify."). Never add filler like "let me know if you need anything else". Ask a question back only when you truly need the answer.
 ACTION is an object with exactly one key:
 {"open_app": "<app name>"}  {"focus_window": "<part of an open window's title>"}  {"open_url": "https://..."}
 {"search_web": "<query>"}  {"type": "<text to type>"}  {"press": "<key or combo like ctrl+t or win+d>"}
@@ -498,9 +498,17 @@ def _unload_when_idle():
     global _local
     while _local is not None:
         time.sleep(20)
-        if time.monotonic() - _local_used > 180 and _local_lock.acquire(blocking=False):
+        if time.monotonic() - _local_used > 60 and _local_lock.acquire(blocking=False):
             try:
-                _local = None
+                brain, _local = _local, None
+                try:
+                    brain.close()
+                except Exception:
+                    pass
+                del brain
+                import gc
+                gc.collect()
+                trim_memory()
             finally:
                 _local_lock.release()
 
@@ -528,8 +536,8 @@ def local_llm(note=lambda s, frac=None: None, load=True):
         if not load:
             return None
         note("Waking the offline brain…")
-        _local = Llama(model_path=str(LOCAL_FILE), n_ctx=4096, n_threads=max(2, (os.cpu_count() or 4) // 2),
-                       verbose=False)
+        _local = Llama(model_path=str(LOCAL_FILE), n_ctx=2048, n_batch=256, n_threads=max(2, (os.cpu_count() or 4) // 2),
+                       verbose=False)  # 2048 tokens is plenty for one request, and half the memory of 4096
         threading.Thread(target=_unload_when_idle, daemon=True).start()
     return _local
 
@@ -542,7 +550,8 @@ WHISPER_FILES = ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt")
 def stt_engine(cfg, note=lambda s, frac=None: None):
     """Whisper through faster-whisper, int8 on the CPU: about 0.4 s for a spoken command, 145 MB, downloaded once.
     It copes with accents, spells names properly and is told your app and window names, so "Jupyter" stays Jupyter."""
-    global _stt
+    global _stt, _stt_used
+    _stt_used = time.monotonic()
     if _stt is None:
         name = cfg.get("stt_model", "base.en")  # tiny.en is quicker, small.en is sharper (480 MB)
         try:
@@ -565,19 +574,62 @@ def stt_engine(cfg, note=lambda s, frac=None: None):
     return _stt
 
 
+def sane_transcript(text, hints=(), other=""):
+    """False for what Whisper writes when there is nothing to hear: its hints read back, one phrase on repeat, or a
+    long sentence where the other ear heard a word or two."""
+    words = re.findall(r"[a-z0-9']+", text.lower())
+    if not words:
+        return False
+    if len(words) >= 6 and len(set(words)) / len(words) < 0.5:
+        return False
+    hint_words = {w for h in hints for w in re.findall(r"[a-z0-9']+", h.lower())}
+    if len(words) >= 3 and sum(w in hint_words for w in words) / len(words) > 0.6:
+        return False
+    return not (other and len(other.split()) <= 2 and len(words) > 6)
+
+
 def hear_local(cfg, pcm, hints=()):
     """What was said, from 16 kHz int16 audio. Segments Whisper itself doubts are dropped."""
     x = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768
     if len(x) < 4800:
         return ""
-    prompt = "Zehen, voice commands for a PC assistant. " + ", ".join(h for h in hints if h)[:600]  # it spells "Zehen"
+    prompt = "Zehen, voice commands for a PC assistant. " + ", ".join(h for h in list(hints)[:14] if h)[:260]
     segs, _ = stt_engine(cfg).transcribe(x, language="en", beam_size=3, temperature=0, initial_prompt=prompt,
                                          condition_on_previous_text=False)
     return " ".join(g.text.strip() for g in segs if g.no_speech_prob < 0.6 and g.avg_logprob > -1.3).strip()
 
 
+_tts_used = _stt_used = 0.0
+
+
+def trim_memory():
+    """Hand idle pages back to Windows so Task Manager shows what ZEHEN really needs right now."""
+    if sys.platform == "win32":
+        k = ctypes.windll.kernel32
+        k.SetProcessWorkingSetSize(k.GetCurrentProcess(), ctypes.c_size_t(-1), ctypes.c_size_t(-1))
+
+
+def memory_keeper():
+    """Runs for the life of the app: Noor's voice and ear (about 300 MB between them) are dropped after two idle minutes
+    and reload in 1 to 2 s, which is hidden behind you speaking; after a quiet minute the working set is trimmed."""
+    global _tts, _stt
+    import gc
+    while True:
+        time.sleep(20)
+        now = time.monotonic()
+        if _tts is not None and now - _tts_used > 120:
+            _tts = None
+            gc.collect()
+        if _stt is not None and now - _stt_used > 120:
+            _stt = None
+            gc.collect()
+        if now - max(_tts_used, _stt_used, _local_used) > 60:
+            trim_memory()
+
+
 def tts_engine():
-    global _tts
+    global _tts, _tts_used
+    _tts_used = time.monotonic()
     if _tts is None:
         from kokoro_onnx import Kokoro
         for name in KOKORO_FILES:
@@ -832,6 +884,8 @@ def _chat_local(messages, note):
     with _local_lock:
         out = local_llm(note).create_chat_completion(  # json_object: the decoder can only write valid JSON
             messages=messages[:-1] + [last], max_tokens=300, temperature=0.1, response_format={"type": "json_object"})
+    global _local_used
+    _local_used = time.monotonic()  # the quiet minute starts when she finishes, not when she started
     return out["choices"][0]["message"]["content"]
 
 
@@ -1198,6 +1252,13 @@ class Voice:
         """Speak without blocking the caller (the tutorial's voice)."""
         threading.Thread(target=self.speak, args=(text,), daemon=True).start()
 
+    def _prewarm(self):
+        for load in (lambda: stt_engine(self.cfg), tts_engine):
+            try:
+                load()
+            except Exception:
+                pass
+
     def _warm_ears(self):
         try:
             stt_engine(self.cfg, self.note)
@@ -1341,6 +1402,7 @@ class Voice:
         import queue
         import vosk
         self.state = "listening"
+        threading.Thread(target=self._prewarm, daemon=True).start()  # her ear and voice load while you are still talking
         rec = vosk.KaldiRecognizer(model, 16000)
         rec.SetWords(True)
         audio, words, spoke, t0 = [], [], False, time.monotonic()
@@ -1384,6 +1446,9 @@ class Voice:
                 return  # woke, then nobody spoke
         words += json.loads(rec.FinalResult()).get("result", [])
         pcm = b"".join(audio)
+        if not (live_loud or phrase_cmd >= 2 or (cut is None and phrase_loud >= 8)):
+            self.state = "idle"
+            return  # nothing was said after the wake word: don't let anything invent a request out of silence
         if cut is None:
             cut = 0.0
         if phrase and words and cut == 0.0:
@@ -1408,7 +1473,10 @@ class Voice:
         heard, small = whisper(self.cfg, pcm), text
         if not heard:
             try:
-                heard = hear_local(self.cfg, pcm, self.hints())  # the whole phrase, wake word included
+                hints = self.hints()
+                heard = hear_local(self.cfg, pcm, hints)  # the whole phrase, wake word included
+                if heard and not sane_transcript(heard, hints, small):
+                    heard = ""  # it was making things up: trust the small model's few words instead
             except Exception:
                 heard = ""
         if os.environ.get("ZEHEN_DEBUG"):
@@ -1632,6 +1700,8 @@ class Tracker:
         self.ui, self.aspect = panel(), 16 / 9
         self._publish(0.0, [], None, None, 0.0, None, 0.0, False)
         self.setup = Setup(cfg) if start else None  # first run: fetch whatever is missing, skip what is here
+        if start:
+            threading.Thread(target=memory_keeper, daemon=True).start()
         self.memory, self.camera_on = [], cfg.get("camera_on", True)  # memory: the last few things you asked
         self.chatty = False  # the last request was a conversation (no actions): she keeps listening for your reply
         self.dict_until, self.last_typed = 0.0, ""  # dictation: what you say is typed, until you say stop
@@ -1679,7 +1749,7 @@ class Tracker:
     def _loop(self):
         if self.setup is not None:
             self.setup.item("hands")["finished"].wait(180)  # its file may still be arriving on a first run
-        det = make_detector()
+        det = make_detector()  # released while the camera is off, loaded again when it is back
         sw, sh = pyautogui.size()
         fx, fy = OneEuro(), OneEuro()
         pfx, pfy = OneEuro(INK_MIN_CUTOFF, INK_BETA), OneEuro(INK_MIN_CUTOFF, INK_BETA)
@@ -1694,6 +1764,9 @@ class Tracker:
                     if self.cam is not None:
                         self.cam.release()
                         self.cam = None
+                        if det is not None:
+                            det.close()
+                            det = None
                     self._release()
                     self._end_stroke(now)
                     raw, count, gesture, scroll_y0, self.zoom_d0, self.hover = None, 0, None, None, None, None
@@ -1701,6 +1774,8 @@ class Tracker:
                     self._publish(now, [], None, None, 0.0, None, now, False)
                     time.sleep(0.1)
                     continue
+                if det is None:
+                    det = make_detector()
                 if self.cam is None:
                     self.cam = open_camera(self.cfg.get("camera", 0))
                     if self.cam is None:
@@ -2062,13 +2137,22 @@ class Tracker:
                                             + (f"Another transcript of the same audio: {alts[0]}\n" if alts else "")
                                             + f"Request (from speech recognition): {text}"}]
         self._say("")
-        say, acts = "", []
+        say, acts, failed, worked = "", [], [], []
         self.chatty = False
         try:
             for _ in range(MAX_STEPS):
                 reply = chat(self.cfg, msgs, self._say)
                 say, acts, done = parse_plan(reply)
-                out = [o for o in (self._do(*next(iter(a.items()))) for a in acts) if o]
+                out = []
+                for a in acts:
+                    kind, v = next(iter(a.items()))
+                    self._say(self._describe(kind, v))  # shows in the pill while it works: what she is doing right now
+                    if (o := self._do(kind, v)):
+                        out.append(o)
+                        if o.startswith("no "):
+                            failed.append(o)
+                        elif o.startswith(("opened", "switched", "playing", "clicked")):
+                            worked.append(o)
                 if done or not out or self.paused:
                     break
                 msgs += [{"role": "assistant", "content": reply},
@@ -2079,10 +2163,35 @@ class Tracker:
             say = f"{type(e).__name__}: {e}"
         say = " ".join(re.split(r"(?<=[.!?]) ", say)[:2])  # two sentences at most: she talks to be useful, not to talk
         say = re.sub(r"\s+", " ", re.sub(r"[^\w\s.,!?'\-:;()%/&+@#$]", "", say)).strip()  # no emoji or markdown to read aloud
+        if failed:  # it didn't work: say so, whatever the model claimed
+            what = failed[0].split("'")[1] if "'" in failed[0] else "that"
+            say = f"I couldn't find {what}."
+        elif acts and say.lower().strip(" .!") in ("", "done", "ok", "okay"):
+            say = (worked[-1][:1].upper() + worked[-1][1:] if worked else  # what really happened, not "Done"
+                   self._describe(*next(iter(acts[-1].items())), past=True)) + "."
+        elif not acts and say.lower().strip(" .!") in ("", "done", "ok", "okay", "sure", "alright"):
+            say = ""  # nothing to do and nothing to say: stay quiet rather than make something up
         self.chatty = not acts and bool(say)
-        self._say(say or "Done.")  # also clears any download bar
+        self._say(say)  # also clears any download bar
         self.memory = (self.memory + [f"{text} => {self.reply}"])[-5:]
         return self.reply
+
+    @staticmethod
+    def _describe(kind, v, past=False):
+        """One honest phrase for an action: "Opening Spotify" while it runs, "Opened Spotify" when it has."""
+        host = urllib.parse.urlparse(v).netloc.removeprefix("www.") if kind == "open_url" else v
+        now, then = {"open_app": ("Opening {}", "Opened {}"), "focus_window": ("Switching to {}", "Switched to {}"),
+                     "open_url": ("Opening {}", "Opened {}"), "search_web": ("Searching for {}", "Searched for {}"),
+                     "type": ("Typing", "Typed it"), "press": ("Pressing {}", "Pressed {}"),
+                     "powershell": ("Running a command", "Ran the command"), "click": ("Clicking {}", "Clicked {}"),
+                     "play": ("Finding the video", "Playing it"), "tab": ("Switching tabs", "Switched tabs"),
+                     "switch": ("Switching to {}", "Switched to {}"), "scroll": ("Scrolling", "Scrolled"),
+                     "open_folder": ("Opening {}", "Opened {}"), "ui_list": ("Looking at the screen", "Looked"),
+                     "wait": ("Waiting", "Waited"), "volume": ("Volume {}", "Volume {}"), "window": ("Window {}", "Window {}"),
+                     "media": ("Media", "Media"), "mouse": ("Clicking", "Clicked"), "zoom": ("Zooming", "Zoomed"),
+                     "focus_input": ("Finding the text box", "Ready to type"), "dictate": ("Ready to type", "Ready to type")
+                     }.get(kind, ("Working", "Done"))
+        return (then if past else now).format(host[:40])
 
     def set_camera(self, on):
         """Camera off = voice only: the sensor really stops (its light goes out) and hands are ignored."""
@@ -2095,12 +2204,18 @@ class Tracker:
         if kind == "open_app":
             if m := search_apps(self.apps, v, 1):
                 launch(m[0][1])
+                return "opened " + m[0][0]
+            return f"no app like '{v}'"
         elif kind == "focus_window":
             if m := next((h for h, t in list_windows() if fold(v) in fold(t)), None):
                 focus_window(m)
+                return "switched to " + v
+            return f"no window like '{v}'"
         elif kind == "open_url":
             if v.startswith(("http://", "https://")):
                 webbrowser.open(v)
+                return "opened " + urllib.parse.urlparse(v).netloc
+            return f"no link like '{v}'"
         elif kind == "search_web":
             webbrowser.open("https://www.google.com/search?q=" + urllib.parse.quote(v))
         elif kind == "type":
@@ -3118,6 +3233,24 @@ def selftest():
     got = {i["key"]: i["state"] for i in st.items}
     assert got == {"a": "found", "b": "done", "c": "skipped", "d": "failed"}, got  # present: skipped; missing: fetched
     assert calls == ["b", "d"] and st.item("d")["msg"] == "no internet" and st.progress()[:2] == (4, 4)
+    hints = ["Alacritty", "Auto-Tune Pro", "Spotify", "YouTube"]
+    assert not sane_transcript("Alacritty, Auto-Tune Pro, Auto-Tune Pro, Auto-Tune Pro, Auto-Tune Pro", hints)  # the leak
+    assert not sane_transcript("Thank you. Thank you. Thank you. Thank you. Thank you. Thank you.", hints)
+    assert not sane_transcript("this is a very long made up sentence about nothing at all", hints, "him")
+    assert sane_transcript("Open Spotify and YouTube.", hints) and sane_transcript("What is the capital of France?", hints, "what is")
+    ht = Tracker(None, {}, start=False)
+    ht.apps = [("Spotify", "s")]
+    ht._do = lambda kind, v: ("opened Spotify" if kind == "open_app" and v == "spotify" else f"no app like '{v}'")
+    script2 = iter(['{"say": "Done.", "do": [{"open_app": "spotify"}]}', '{"say": "Done.", "do": [{"open_app": "zzz"}]}',
+                    '{"say": "Done.", "do": []}'])
+    chat_before = globals()["chat"]
+    globals()["chat"] = lambda cfg, msgs, note=None: next(script2)
+    try:
+        assert ht._agent("get my music app going please") == "Opened Spotify."   # not a blind "Done."
+        assert ht._agent("get the zzz thing going for me") == "I couldn't find zzz."  # honest when it fails
+        assert ht._agent("blah blah more words here") == ""                            # nothing to do: silence
+    finally:
+        globals()["chat"] = chat_before
     quiet_t = Tracker(None, {}, start=False)
     assert quiet_t._agent("thank you") == "" and quiet_t._agent("okay") == ""  # pleasantries: silence, not a chat
     names = ["SEM7_ML_PB_2026_TEST-2.pdf", "API Keys - GroqCloud", "(908) YouTube"]
