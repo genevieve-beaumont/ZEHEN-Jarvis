@@ -450,6 +450,8 @@ ACTION is an object with exactly one key:
 {"search_web": "<query>"}  {"type": "<text to type>"}  {"press": "<key or combo like ctrl+t or win+d>"}
 {"window": "max"|"min"|"close"}  {"volume": "up"|"down"}  {"media": "playpause"|"nexttrack"|"prevtrack"}
 {"open_folder": "desktop"|"downloads"|"documents"|"pictures"|"music"|"videos"}
+{"play": "first"|"2"|"<words from a video's title>"} plays a video on the page, or finds it on YouTube
+{"focus_input": "search"|"message"|"address"} puts the cursor in that box; {"dictate": "on"} then types what the user says
 {"tab": "<words from a browser tab's title>"}  {"switch": "<words from a window or tab title>"}  switch tabs and windows
 {"powershell": "<command>"}  runs hidden as the user and returns its output: use it for anything else on Windows
 (files, folders, settings, processes, network, installs).
@@ -463,7 +465,8 @@ PLEASANT = {"thank you", "thanks", "thank you so much", "thanks a lot", "ok", "o
             "perfect", "bye", "goodbye", "that's all", "no thanks", "fine", "alright", "got it", "hmm", "yes", "no",
             "yeah", "yep", "nope", "sure", "right", "oh", "wow", "hello", "hi", "hey"}
 ACTIONS = {"open_app", "focus_window", "open_url", "search_web", "type", "press", "window", "volume", "media",
-           "powershell", "wait", "ui_list", "click", "scroll", "mouse", "zoom", "open_folder", "tab", "switch"}
+           "powershell", "wait", "ui_list", "click", "scroll", "mouse", "zoom", "open_folder", "tab", "switch", "play",
+           "focus_input", "dictate"}
 FOLDERS = {"desktop": "shell:Desktop", "downloads": "shell:Downloads", "documents": "shell:Personal",
            "pictures": "shell:My Pictures", "music": "shell:My Music", "videos": "shell:My Video"}
 MAX_STEPS = 6
@@ -753,6 +756,20 @@ def _quick_one(t, text, apps):
             f"-ArgumentList '-m','{tool}'; 'started' }} else {{ 'NOTFOUND' }} }}")}]
     if t in ("install jupyter", "install jupiter", "install jupyter notebook"):
         return "Installing Jupyter", [{"powershell": "python -m pip install notebook 2>&1 | Select-Object -Last 1"}]
+    if m := re.fullmatch(r"(?:play|open|watch|click|start)(?: on)?(?: the)? (first|second|third|fourth|fifth|top|1st|2nd|3rd|4th|5th|\d)"
+                         r"(?: video| one| result| link| song)?", t):
+        return "Playing video " + m[1], [{"play": m[1]}]
+    if m := re.fullmatch(r"(?:play|watch|open)(?: the)?(?: video| song)? (.+?) (?:on youtube|video|video on youtube)", t):
+        return "Playing " + m[1], [{"open_url": YT_SEARCH + urllib.parse.quote(m[1])}, {"wait": "4.5"}, {"play": "1"}]
+    if m := re.fullmatch(r"(?:search|find|look for)(?: for)? (.+?) on youtube", t):
+        return "Searching YouTube", [{"open_url": YT_SEARCH + urllib.parse.quote(m[1])}]
+    if m := re.fullmatch(r"(?:click|select|focus|go to|open|use|put the cursor in)(?: on| in)?(?: the)? "
+                         r"(search|type|text|message|chat|address|url|comment|input|reply|prompt)(?: bar| box| field| area| input)?", t):
+        return "Text box", [{"focus_input": m[1]}]
+    if re.fullmatch(r"(?:start )?(?:dictate|dictation|dictation mode|typing mode|start typing|type for me|take dictation)", t):
+        return "Ready to type", [{"dictate": "on"}]
+    if (m := re.fullmatch(r"(?:play|watch) (.+)", t)) and not re.search(r" on (?!youtube)\w+$", t):
+        return "Playing " + m[1], [{"play": m[1]}]  # on the page, else found on YouTube
     if m := re.fullmatch(r"(?:switch|go|jump|change|move) (?:back )?to (?:the )?tab (\d)", t):
         return "Tab " + m[1], [{"press": "ctrl+" + m[1]}]
     if m := re.fullmatch(r"(?:(?:switch|go|jump|change|move)(?: back)? to|(?:open|show|select|find|focus))(?: the)? (.+?) tab", t):
@@ -862,15 +879,18 @@ UI_KINDS = {"ButtonControl": "button", "EditControl": "text box", "ListItemContr
             "ComboBoxControl": "dropdown", "TreeItemControl": "item", "RadioButtonControl": "option"}
 
 
-def ui_controls(limit=400):
+def ui_controls(limit=400, top=None):
     """Clickable things in the window in front, read through Windows UI Automation (no screenshots, no vision
     model, almost no RAM): [(kind, name, control)]. Works with any app that exposes accessibility, which is
     nearly all of them, Electron and browsers included."""
     import uiautomation as auto
-    top = auto.GetForegroundControl()
-    top = top.GetTopLevelControl() if top else None
-    out = []
-    for c, _ in auto.WalkControl(top, maxDepth=14) if top else []:
+    if top is None:
+        top = auto.GetForegroundControl()
+        top = top.GetTopLevelControl() if top else None
+    out, t0 = [], time.monotonic()
+    for c, _ in auto.WalkControl(top, maxDepth=45) if top else []:  # web pages sit 25+ levels deep
+        if time.monotonic() - t0 > 4:
+            break  # a huge page: work with what we have
         if c.ControlTypeName in UI_KINDS and c.Name.strip() and not c.IsOffscreen:
             out.append((UI_KINDS[c.ControlTypeName], c.Name.strip().replace("\n", " "), c))
         if len(out) >= limit:
@@ -942,11 +962,81 @@ def ui_click(name):
     want = fold(name)
     for test in (lambda n: fold(n) == want, lambda n: want in fold(n),
                  lambda n: difflib.SequenceMatcher(None, want, fold(n)).ratio() > 0.75):  # exact, contains, close
-        for _, n, c in found:
+        for k, n, c in found:
             if test(n):
                 c.Click()
-                return f"clicked {n[:50]}"
+                return f"clicked {k}: {n[:50]}"
     return f"no '{name}' here: use ui_list"
+
+
+ORDINALS = {"first": 1, "1st": 1, "top": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3, "fourth": 4, "4th": 4,
+            "fifth": 5, "5th": 5}
+YT_SEARCH = "https://www.youtube.com/results?search_query="
+
+
+def video_links(top=None):
+    """Videos on the page in front, in reading order: YouTube and most video sites name a video's link with its title and
+    length ("... 7 minutes, 6 seconds"). Ads are skipped."""
+    import uiautomation as auto
+    if top is None:
+        top = auto.GetForegroundControl()
+        top = top.GetTopLevelControl() if top else None
+    found, t0 = [], time.monotonic()
+    for c, _ in auto.WalkControl(top, maxDepth=60) if top else []:
+        if time.monotonic() - t0 > 5:
+            break
+        if c.ControlTypeName == "HyperlinkControl":
+            n = c.Name.strip()
+            if re.search(r"\b\d+\s+(?:second|minute|hour)s?\b", n) and not re.search(r"sponsored|\bad\b", n, re.I) \
+                    and not c.IsOffscreen and c.BoundingRectangle.width() >= 120:
+                r = c.BoundingRectangle
+                found.append((r.top // 40, r.left, n, c))  # rows of 40 px, then left to right
+    found.sort(key=lambda f: (f[0], f[1]))
+    return [(n, c) for _, _, n, c in found]
+
+
+def play_video(query, top=None):
+    """"1" (the first), "3", or words from a title. Words that match nothing on the page search YouTube and play the
+    top result."""
+    q = query.strip().lower()
+    vids = video_links(top)
+    if q.isdigit() or q in ORDINALS:
+        i = (int(q) if q.isdigit() else ORDINALS[q]) - 1
+        if i < len(vids):
+            vids[i][1].Click()
+            return "playing " + re.sub(r" \d+ (?:second|minute|hour).*$", "", vids[i][0])[:60]
+        return "no video here: " + (f"only {len(vids)} on the page" if vids else "none on this page")
+    i = best_match(query, [n for n, _ in vids])
+    if i is not None:
+        vids[i][1].Click()
+        return "playing " + re.sub(r" \d+ (?:second|minute|hour).*$", "", vids[i][0])[:60]
+    webbrowser.open(YT_SEARCH + urllib.parse.quote(query))  # not on this page: find it on YouTube
+    for _ in range(4):
+        time.sleep(2.5)
+        top_now = None
+        if (vids := video_links(top_now)):
+            vids[0][1].Click()
+            return "playing " + re.sub(r" \d+ (?:second|minute|hour).*$", "", vids[0][0])[:60]
+    return f"no video like '{query}' found"
+
+
+def focus_input(hint="", top=None):
+    """Put the cursor in a text box of the app in front, ready for you to speak: "search" finds the search bar,
+    "message" the chat box, otherwise the biggest box on screen."""
+    boxes = [(n, c) for k, n, c in ui_controls(400, top) if k == "text box"]
+    words = _toks(hint)
+    key = [w for w in words if w in ("search", "address", "url", "message", "chat", "comment", "reply", "prompt", "type")]
+    pick = next((c for n, c in boxes if any(w in _toks(n) or (w == "url" and "address" in _toks(n)) for w in key)), None)
+    if pick is None and boxes:
+        pick = max(boxes, key=lambda b: b[1].BoundingRectangle.width() * b[1].BoundingRectangle.height())[1]
+    if pick is None:
+        return "no text box here"
+    pick.Click()
+    try:
+        pick.SetFocus()
+    except Exception:
+        pass
+    return "ready to type"
 
 
 def whisper(cfg, pcm):
@@ -1027,8 +1117,11 @@ class Voice:
     """Hands-free: say "Zehen" (wake word via Vosk, offline, always listening on this PC) -> your request (Whisper if you
     have a Groq key, else Vosk) -> on_text(text) returns what to say back. state drives the HUD."""
 
-    def __init__(self, cfg, on_text, paused, note=lambda s, frac=None: None, chatty=lambda: False, hints=lambda: []):
+    def __init__(self, cfg, on_text, paused, note=lambda s, frac=None: None, chatty=lambda: False, hints=lambda: [],
+                 keep=lambda: False, setup=None):
+        self.setup = setup
         self.cfg, self.on_text, self.paused, self.note, self.chatty = cfg, on_text, paused, note, chatty
+        self.keep = keep  # dictating: stay in listening mode, no wake word needed
         self.hints, self.alts = hints, []  # names to listen for; the other ear's version of the last request
         self.state, self.error, self.muted = "loading", "", False  # loading|idle|listening|thinking|speaking|off
         self.level, self.floor, self.spoke = 0.0, 300.0, False  # mic loudness 0..1 for the HUD; room noise; did we talk
@@ -1121,21 +1214,19 @@ class Voice:
             h = time.localtime().tm_hour
             part = "morning" if h < 12 else "afternoon" if h < 18 else "evening"
             self.speak(random.choice(GREETINGS).format(part=part))
-        need_brain = llm_endpoint(self.cfg) is None and not LOCAL_FILE.exists() and self.cfg.get("brain_setup", True)
+        brain = self.setup.item("brain") if self.setup is not None and self.cfg.get("brain_setup", True) else None
+        need_brain = brain is not None and brain["state"] in ("pending", "working")
         if need_brain:
             self.speak("Before we start, I need to set up my brain. It's a one-time download of about a gigabyte. "
                        "Carry on with the tutorial. I'll tell you when I'm ready.")
         self.ready.set()
-        if llm_endpoint(self.cfg) is None and self.cfg.get("brain_setup", True):
-            try:
-                local_llm(self.note, load=False)  # first run: install and download it, with progress on the HUD
-                self.note("")
-                if need_brain:
-                    self.say("My brain is installed. Ready when you are.")
-            except RuntimeError as e:
-                self.note(str(e))
-                if need_brain:
-                    self.say("I couldn't finish setting up my brain. You can paste a free key from the panel instead.")
+        if need_brain:
+            brain["finished"].wait()  # the checklist does the downloading; the panel shows it
+            self.note("")
+            if brain["state"] == "done":
+                self.say("My brain is installed. Ready when you are.")
+            elif brain["state"] == "failed":
+                self.say("I couldn't finish setting up my brain. You can add a free key from the panel instead.")
 
     def _run(self):
         try:
@@ -1150,6 +1241,8 @@ class Voice:
         import sounddevice as sd
         import vosk
         vosk.SetLogLevel(-1)
+        if self.setup is not None:
+            self.setup.core.wait()  # the checklist is fetching the essentials: packages, wake word, voice, hearing
         if not VOSK_DIR.exists():
             fetch(VOSK_URL, VOSK_DIR, unzip=True)
         model = vosk.Model(str(VOSK_DIR))
@@ -1211,7 +1304,7 @@ class Voice:
                     rec, hist, stable, onset, loud_n, checked = wake(), [], 0, None, 0, False
                     while self.spoke and not q.empty():
                         q.get_nowait()  # her own voice, echoing in the mic. Anything you said meanwhile is kept
-                    if self.follow:
+                    if self.follow or self.keep():
                         time.sleep(0.5)  # let the room's echo of her own voice die away first
                         while not q.empty():
                             q.get_nowait()
@@ -1287,7 +1380,7 @@ class Voice:
             if live and quiet >= 7 and (live_loud or phrase_cmd >= 2 or (cut is None and phrase_loud >= 8)
                                         or time.monotonic() - t0 > 2.5):
                 break  # a real pause after you stopped talking: that was the whole request
-            if not spoke and not words and live and time.monotonic() - t0 > 6:
+            if not spoke and not words and live and time.monotonic() - t0 > (10 if self.keep() else 6):
                 return  # woke, then nobody spoke
         words += json.loads(rec.FinalResult()).get("result", [])
         pcm = b"".join(audio)
@@ -1399,6 +1492,124 @@ def make_detector():
         num_hands=2, min_hand_detection_confidence=0.6, min_tracking_confidence=0.6))
 
 
+# --- First run: one checklist for everything ZEHEN needs. What is already on this PC is skipped. ---
+
+SETUP_MODULES = {"vosk": "vosk", "sounddevice": "sounddevice", "faster_whisper": "faster-whisper",
+                 "kokoro_onnx": "kokoro-onnx", "uiautomation": "uiautomation"}
+
+
+def _missing_packages():
+    import importlib.util
+    return [pip for mod, pip in SETUP_MODULES.items() if importlib.util.find_spec(mod) is None]
+
+
+def _install_packages(note):
+    if getattr(sys, "frozen", False):
+        raise RuntimeError("these are bundled in the .exe")
+    miss = _missing_packages()
+    note("Installing " + ", ".join(miss))
+    if subprocess.run([sys.executable, "-m", "pip", "install", *miss], capture_output=True,
+                      creationflags=0x08000000).returncode:
+        raise RuntimeError("pip couldn't install " + ", ".join(miss))
+
+
+def _fetch_all(base, folder, files, label):
+    """Run-function for a model made of several files: only the missing ones are downloaded."""
+    def run(note):
+        folder.mkdir(parents=True, exist_ok=True)
+        for i, f in enumerate(files):
+            if not (folder / f).exists():
+                fetch(base + f, folder / f, progress=lambda d, n, i=i: note(
+                    f"{label} {d / 1e6:.0f}/{n / 1e6:.0f} MB", (i + (d / n if n else 0)) / len(files)))
+    return run
+
+
+def setup_items(cfg):
+    """The checklist, in order. check(): already here? skip(): not needed right now. run(note): get it."""
+    name = cfg.get("stt_model", "base.en")
+    whisper_dir = DATA / ("whisper-" + name)
+    items = [
+        dict(key="packages", name="Python packages", core=True, check=lambda: not _missing_packages(),
+             run=_install_packages),
+        dict(key="hands", name="Hand tracking model", core=False, check=MODEL.exists,
+             run=lambda note: fetch(MODEL_URL, MODEL, progress=lambda d, n: note(
+                 f"Hand model {d / 1e6:.0f}/{n / 1e6:.0f} MB", d / n if n else None)))]
+    if cfg.get("voice", True):
+        items += [
+            dict(key="wake", name="Wake word (Vosk)", core=True, check=VOSK_DIR.exists,
+                 run=lambda note: fetch(VOSK_URL, VOSK_DIR, unzip=True, progress=lambda d, n: note(
+                     f"Wake word {d / 1e6:.0f}/{n / 1e6:.0f} MB", d / n if n else None))),
+            dict(key="voice", name="Her voice (Kokoro)", core=True,
+                 check=lambda: all((DATA / f).exists() for f in KOKORO_FILES),
+                 run=_fetch_all(KOKORO_URL, DATA, KOKORO_FILES, "Voice")),
+            dict(key="hearing", name="Hearing (Whisper)", core=True,
+                 check=lambda: all((whisper_dir / f).exists() for f in WHISPER_FILES),
+                 run=_fetch_all(WHISPER_URL % name, whisper_dir, WHISPER_FILES, "Hearing")),
+            dict(key="brain", name="Offline brain (Qwen3)", core=False,
+                 skip=lambda: "using your cloud key" if llm_endpoint(cfg) else "",
+                 check=lambda: LOCAL_FILE.exists() and _llama_ready(),
+                 run=lambda note: local_llm(note, load=False))]
+    return items
+
+
+def _llama_ready():
+    import importlib.util
+    return importlib.util.find_spec("llama_cpp") is not None or bool(getattr(sys, "frozen", False))
+
+
+class Setup:
+    """Runs the checklist on a thread. State per item: pending, working, found (already here), skipped, done, failed.
+    Anything missing is fetched; anything present is left alone, so a fork's first run gets everything and every later
+    run takes a blink. A failure (offline, disk full) is shown and retried next launch."""
+
+    def __init__(self, cfg, items=None):
+        self.items = items if items is not None else setup_items(cfg)
+        for it in self.items:
+            it.setdefault("skip", lambda: "")
+            it.update(state="pending", frac=None, msg="", finished=threading.Event())
+        self.core, self.done, self.running = threading.Event(), threading.Event(), False
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        self.done.clear()
+        for it in self.items:
+            it["finished"].clear()
+            it["state"], it["msg"] = "pending", ""
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        for it in self.items:
+            it["state"] = "working"
+            try:
+                if why := it["skip"]():
+                    it["state"], it["msg"] = "skipped", why
+                elif it["check"]():
+                    it["state"], it["msg"] = "found", "already here"
+                else:
+                    it["run"](lambda msg, frac=None, it=it: it.update(msg=msg, frac=frac))
+                    it["state"], it["msg"] = "done", ""
+            except Exception as e:
+                it["state"], it["msg"] = "failed", (str(e) or type(e).__name__)[:70]
+            it["frac"] = None
+            it["finished"].set()
+            if all(i["finished"].is_set() for i in self.items if i.get("core")):
+                self.core.set()
+        self.core.set()
+        self.running = False
+        self.done.set()
+
+    def item(self, key):
+        return next((i for i in self.items if i["key"] == key), None)
+
+    def progress(self):
+        """(finished, total, the item being worked on or None)."""
+        total = len(self.items)
+        return (sum(i["state"] in ("found", "skipped", "done", "failed") for i in self.items), total,
+                next((i for i in self.items if i["state"] == "working"), None))
+
+
 class Tracker:
     """Camera + gestures on a background thread. The UI only reads self.state, a fresh snapshot per frame.
     Main hand (right, or whichever is alone) drives the cursor; the other hand zooms and switches apps."""
@@ -1420,11 +1631,15 @@ class Tracker:
         self.tap_at, self.tap_pos, self.double_at = -9.0, None, -9.0  # last quick click: double-pinch detection
         self.ui, self.aspect = panel(), 16 / 9
         self._publish(0.0, [], None, None, 0.0, None, 0.0, False)
+        self.setup = Setup(cfg) if start else None  # first run: fetch whatever is missing, skip what is here
         self.memory, self.camera_on = [], cfg.get("camera_on", True)  # memory: the last few things you asked
         self.chatty = False  # the last request was a conversation (no actions): she keeps listening for your reply
-        self.voice = (Voice(cfg, self._agent, lambda: self.paused, self._say, lambda: self.chatty, self._hints)
+        self.dict_until, self.last_typed = 0.0, ""  # dictation: what you say is typed, until you say stop
+        self.voice = (Voice(cfg, self._agent, lambda: self.paused, self._say, lambda: self.chatty, self._hints,
+                      self.dictating, self.setup)
                       if start and cfg.get("voice", True) else None)
         if start:
+            self.setup.start()
             if self.voice and sys.platform == "win32":
                 self.voice.start()
             threading.Thread(target=self._load_apps, daemon=True).start()
@@ -1462,6 +1677,8 @@ class Tracker:
         self.flash, self.flash_until = text, time.monotonic() + secs
 
     def _loop(self):
+        if self.setup is not None:
+            self.setup.item("hands")["finished"].wait(180)  # its file may still be arriving on a first run
         det = make_detector()
         sw, sh = pyautogui.size()
         fx, fy = OneEuro(), OneEuro()
@@ -1732,6 +1949,36 @@ class Tracker:
         else:
             self._type(" ")
 
+    def dictating(self):
+        return time.monotonic() < self.dict_until
+
+    def _dictate(self, text):
+        """While dictating, what you say is typed as you say it (Whisper's punctuation and capitals included). A few
+        phrases control it. Returns what to say back, or None when this isn't a dictation matter."""
+        t = " ".join(re.sub(r"[^\w\s']", " ", text.lower()).split())
+        if t in ("stop typing", "stop dictation", "stop dictating", "finish typing", "done typing", "end dictation",
+                 "i'm done", "that's all", "stop", "cancel"):
+            self.dict_until = 0.0
+            return "Done typing."
+        if t in ("enter", "press enter", "send", "send it", "send message", "submit", "search", "go", "search it"):
+            pyautogui.press("enter")
+            self.dict_until = 0.0  # you sent it: the text box is done
+            return ""
+        if t in ("new line", "next line", "new paragraph"):
+            pyautogui.press("enter")
+        elif t in ("delete that", "scratch that", "undo that", "remove that"):
+            pyautogui.press("backspace", presses=max(len(self.last_typed), 1))
+            self.last_typed = ""
+        elif t in ("clear", "clear all", "clear everything"):
+            pyautogui.hotkey("ctrl", "a")
+            pyautogui.press("backspace")
+        else:
+            self._type(text.strip() + " ")
+            self.last_typed = text.strip() + " "
+        self.dict_until = time.monotonic() + 25
+        self._say("")
+        return ""
+
     def _hints(self):
         """Words worth listening for: your apps, the sites she knows, the windows open right now."""
         return [n for n, _ in self.apps[:40]] + [k.title() for k in list(SITES)[:12]] + [
@@ -1768,6 +2015,12 @@ class Tracker:
             return ""
         if t in PLEASANT:  # "thanks", "okay", "cool": no reply, and certainly no chat
             return ""
+        if self.dictating() and (r := self._dictate(text)) is not None:
+            return r
+        if self.setup and re.search(r"\b(?:run|do|check|redo|repeat|finish|start)\b.*\bset ?up\b|\binstall everything\b|"
+                                    r"\bdownload (?:everything|what you need)\b", fold(text)):
+            self.setup.start()
+            return "Checking what I need. I'll only fetch what's missing."
         alts = self.voice.alts if self.voice else []
         for heard in [text, *alts]:  # the other ear may have caught it ("click" for "like"): try every version
             quick = quick_command(heard, self.apps)
@@ -1786,6 +2039,17 @@ class Tracker:
             lost = next((o for o in out if o.startswith(("no tab", "no window"))), "")
             if lost:  # tell her what is there, so you can say it again properly
                 return lost.replace("no tab like", "I can't find a tab like").replace("no window or tab like", "I can't find")
+            if any(o.startswith(("ready", "clicked text box")) for o in out):  # a text box has the cursor: speak now
+                self.dict_until = time.monotonic() + 25
+                return "Ready to type."
+            playing = next((o for o in out if o.startswith("playing")), "")
+            if playing:
+                self._say(playing.capitalize() + ".")
+                return ""
+            if any(o.startswith("no video") for o in out):
+                return "I can't find that video here."
+            if any(o.startswith("no text box") for o in out):
+                return "I can't find a text box here."
             bad = next((o for o in out if o.startswith("no '")), "")
             if any("NOTFOUND" in o for o in out):
                 return "Jupyter isn't installed on this PC. Say: install Jupyter, and I'll add it."
@@ -1864,6 +2128,13 @@ class Tracker:
                 v, lambda: None)()
         elif kind == "zoom":
             ctrl_scroll(3 if v == "in" else -3)
+        elif kind == "play":
+            return play_video(v)
+        elif kind == "focus_input":
+            return focus_input(v)
+        elif kind == "dictate":
+            self.dict_until = time.monotonic() + 25 if v == "on" else 0.0
+            return "ready to type"
         elif kind == "tab":
             return switch_tab(v)
         elif kind == "switch":
@@ -2337,6 +2608,8 @@ class HUD:
         state = v.state if v else "off"
         if state == "thinking" or (self.t.dl is not None and now - self.t.reply_at < 30):
             return "working"
+        if self.t.setup is not None and self.t.setup.running and state in ("loading", "idle", "off"):
+            return "working"  # fetching what's missing: the wave ripples
         return state
 
     def status(self, s, now):
@@ -2344,10 +2617,16 @@ class HUD:
         v, mode = self.t.voice, self.voice_mode(now)
         if mode == "paused":
             return "PAUSED", "fist or the pause button to resume", AMBER
+        st = self.t.setup
+        if mode == "working" and st is not None and st.running and not (v and v.state == "thinking"):
+            done, total, cur = st.progress()
+            return "SETTING UP", f"{done}/{total}  {cur['name'] if cur else ''}"[:30], AMBER
         if mode == "working":  # never the word "thinking": say what is actually happening
             return (self.t.reply or "").strip()[:30], "", AMBER
         if mode == "enrolling":
             return "SAY ZEHEN", f"{4 - v.enroll_left} of 3", CYAN
+        if self.t.dictating() and mode != "speaking":
+            return "TYPING", 'say "stop typing" to end', GREEN
         if mode in ("listening", "speaking"):
             return mode.upper(), "go ahead" if mode == "listening" else "", GREEN
         if s.mode:
@@ -2398,9 +2677,13 @@ class HUD:
                           font=self.mono(12, True))
             if detail:
                 c.create_text(px(58), target_h / 2 + px(9), text=detail[:30], anchor="w", fill=SUB, font=self.mono(9))
-            if mode == "working" and self.t.dl is not None:
+            frac = self.t.dl
+            if frac is None and label == "SETTING UP":
+                cur = self.t.setup.progress()[2]
+                frac = cur["frac"] if cur else None
+            if mode == "working" and frac is not None:
                 c.create_rectangle(px(58), target_h - px(8), w - px(16), target_h - px(6), fill=DARK, outline="")
-                c.create_rectangle(px(58), target_h - px(8), px(58) + (w - px(74)) * self.t.dl, target_h - px(6),
+                c.create_rectangle(px(58), target_h - px(8), px(58) + (w - px(74)) * frac, target_h - px(6),
                                    fill=AMBER, outline="")
         self.ch += (target_h - self.ch) * 0.34
         h = int(self.ch)
@@ -2463,7 +2746,34 @@ class HUD:
                           text="camera off: voice only" if not cam else "raise your hand in front of the camera")
         y = by + bh + px(10)
         y += self.draw_voice(c, y, w, now, mode)
+        y += self.draw_setup(c, y, w)
         return self.draw_tutorial(c, y, w, now) if self.tut is not None else self.draw_guide(c, s, y, w)
+
+    def draw_setup(self, c, y, w):
+        """The first-run checklist: each thing ZEHEN needs, whether it was already here, and how far along it is."""
+        st = self.t.setup
+        if st is None or not (st.running or any(i["state"] == "failed" for i in st.items)):
+            return 0
+        px, m = self.px, self.px(14)
+        rows = st.items
+        h = px(32) + len(rows) * px(20)
+        self.chip(m, y, w - m, y + h, px(12), fill=CHIP, outline=AMBER if st.running else "#ff6b6b")
+        done, total, _ = st.progress()
+        c.create_text(m + px(12), y + px(15), text=f"SETUP  {done}/{total}", anchor="w", fill=AMBER, font=self.mono(9, True))
+        c.create_text(w - m - px(12), y + px(15), text="what's here is skipped" if st.running else "retries next launch",
+                      anchor="e", fill=SUB, font=self.mono(8))
+        for i, it in enumerate(rows):
+            ry = y + px(32) + i * px(20) + px(9)
+            text, col = {"found": ("ready", GREEN), "done": ("ready", GREEN), "skipped": ("skipped", SUB),
+                         "pending": ("waiting", SUB), "failed": ((it["msg"] or "failed")[:24], "#ff6b6b"),
+                         "working": (f"{int(it['frac'] * 100)}%" if it["frac"] is not None else "...", AMBER)}[it["state"]]
+            c.create_text(m + px(12), ry, text=it["name"], anchor="w", fill=TEXT if it["state"] == "working" else SUB,
+                          font=self.mono(9))
+            c.create_text(w - m - px(12), ry, text=text, anchor="e", fill=col, font=self.mono(9, True))
+            if it["state"] == "working" and it["frac"] is not None:
+                c.create_rectangle(m + px(12), ry + px(8), m + px(12) + (w - 2 * m - px(24)) * it["frac"], ry + px(10),
+                                   fill=AMBER, outline="")
+        return h + px(8)
 
     def draw_voice(self, c, y, w, now, mode):
         """Voice chip: the live wave, what it is doing and a hint. Returns the height used."""
@@ -2646,6 +2956,23 @@ def main(forced_camera=None):
     root.mainloop()
 
 
+def run_setup_cli():
+    """python zehen.py --setup: fetch everything ZEHEN needs, skipping what is already here, and print the checklist."""
+    st = Setup(load_config())
+    st.start()
+    shown = {}
+    while not st.done.is_set() or any(i["state"] != shown.get(i["key"]) for i in st.items):
+        for i in st.items:
+            line = f"  {i['name']:26} {i['state']:8} {i['msg']}"
+            if i["state"] == "working" and i["msg"]:
+                print("\r" + line, end="", flush=True)
+            elif shown.get(i["key"]) != i["state"] and i["state"] != "pending":
+                print("\r" + line + " " * 10, flush=True)
+            shown[i["key"]] = i["state"]
+        time.sleep(0.3)
+    print("Setup finished." if all(i["state"] != "failed" for i in st.items) else "Setup finished with problems (see above).")
+
+
 def selftest():
     def hand(up, thumb_on_index=False):
         P = lambda x, y: SimpleNamespace(x=x, y=y, z=0.0)
@@ -2763,6 +3090,34 @@ def selftest():
         assert cust["ok"] and seen_urls[-1].startswith("https://api.together.xyz/v1/chat/completions")
     finally:
         urllib.request.urlopen = real_open
+    dt = Tracker(None, {}, start=False)
+    typed = []
+    real_w, real_p = pyautogui.write, pyautogui.press
+    pyautogui.write = lambda text, interval=0: typed.append(text)
+    pyautogui.press = lambda k, **kw: typed.append(("press", k))
+    try:
+        dt.dict_until = time.monotonic() + 25
+        assert dt._agent("Hello, how are you today?") == "" and typed == ["Hello, how are you today? "]  # typed as spoken
+        assert dt._agent("new line") == "" and typed[-1] == ("press", "enter") and dt.dictating()
+        assert dt._agent("send") == "" and not dt.dictating()  # sending ends it
+        dt.dict_until = time.monotonic() + 25
+        assert dt._agent("stop typing") == "Done typing." and not dt.dictating()
+    finally:
+        pyautogui.write, pyautogui.press = real_w, real_p
+    calls = []
+    def item(key, here=False, skip="", boom=False, core=False):
+        def run(note):
+            calls.append(key)
+            note("half way", 0.5)
+            if boom:
+                raise RuntimeError("no internet")
+        return dict(key=key, name=key, core=core, check=lambda: here, run=run, skip=lambda: skip)
+    st = Setup({}, [item("a", here=True, core=True), item("b", core=True), item("c", skip="cloud key"), item("d", boom=True)])
+    st.start()
+    assert st.done.wait(10) and st.core.is_set()
+    got = {i["key"]: i["state"] for i in st.items}
+    assert got == {"a": "found", "b": "done", "c": "skipped", "d": "failed"}, got  # present: skipped; missing: fetched
+    assert calls == ["b", "d"] and st.item("d")["msg"] == "no internet" and st.progress()[:2] == (4, 4)
     quiet_t = Tracker(None, {}, start=False)
     assert quiet_t._agent("thank you") == "" and quiet_t._agent("okay") == ""  # pleasantries: silence, not a chat
     names = ["SEM7_ML_PB_2026_TEST-2.pdf", "API Keys - GroqCloud", "(908) YouTube"]
@@ -2773,6 +3128,11 @@ def selftest():
     assert qc("switch to chrome")[1] == [{"switch": "chrome"}] and qc("new tab")[1] == [{"press": "ctrl+t"}]
     assert qc("go to youtube")[1] == [{"open_url": "https://www.youtube.com"}]  # "go to" a site still opens the site
     assert qc("opened Jupyter Notebook")[1] and qc("search for flights to goa")[1] == [{"search_web": "flights to goa"}]
+    assert qc("play the first video")[1] == [{"play": "first"}] and qc("play second video")[1] == [{"play": "second"}]
+    assert qc("play arijit singh on youtube")[1][0]["open_url"].endswith("arijit%20singh") and qc("play arijit singh on youtube")[1][-1] == {"play": "1"}
+    assert qc("play jaan e jaan")[1] == [{"play": "jaan e jaan"}] and qc("play some relaxing music on spotify") is None
+    assert qc("click on the search bar")[1] == [{"focus_input": "search"}] and qc("click in the message box")[1] == [{"focus_input": "message"}]
+    assert qc("start typing")[1] == [{"dictate": "on"}] and qc("click on trending")[1] == [{"click": "trending"}]
     assert qc("what time is it")[1] == [] and qc("what time is it")[0].startswith("It's ")
     assert qc("what is the weather") is None and qc("move my downloads to d drive") is None  # these need the AI
     say, acts, done = parse_plan('Sure!\n```json\n{"say": "Opening Spotify", "do": [{"open_app": "Spotify"}, {"rm": "x"}, '
@@ -2882,6 +3242,8 @@ if __name__ == "__main__":
     arg = sys.argv[1] if len(sys.argv) > 1 else None
     if arg == "--test":
         selftest()
+    elif arg == "--setup":
+        run_setup_cli()
     elif arg is None or arg.isdigit():
         main(int(arg) if arg else None)
     else:
