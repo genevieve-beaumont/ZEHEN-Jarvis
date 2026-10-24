@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 560" width="1100" height="560" role="img" aria-labelledby="t">
+  <title id="t">The ZEHEN panel: a small glass pill that opens into the full panel</title>
+  <defs>
+    <linearGradient id="wall" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b2a6b"/><stop offset=".5" stop-color="#6b2a7a"/><stop offset="1" stop-color="#0f6b6b"/>
+    </linearGradient>
+    <filter id="blur"><feGaussianBlur stdDeviation="14"/></filter>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <clipPath id="c1"><rect x="60" y="70" width="330" height="62" rx="22"/></clipPath>
+    <clipPath id="c2"><rect x="560" y="40" width="440" height="480" rx="22"/></clipPath>
+    <clipPath id="all"><rect width="1100" height="560" rx="22"/></clipPath>
+  </defs>
+  <g clip-path="url(#all)" font-family="Consolas, 'Courier New', monospace">
+    <rect width="1100" height="560" fill="url(#wall)"/>
+    <g opacity=".55" filter="url(#blur)"><circle cx="220" cy="420" r="110" fill="#ffcc00"/><circle cx="780" cy="120" r="120" fill="#ff3b30"/><circle cx="930" cy="470" r="110" fill="#34c759"/></g>
+
+    <!-- the pill -->
+    <g clip-path="url(#c1)"><rect x="60" y="70" width="330" height="62" fill="#08121a" fill-opacity=".62"/></g>
+    <rect x="60.5" y="70.5" width="329" height="61" rx="22" fill="none" stroke="#1d6674"/>
+    <circle cx="96" cy="101" r="17" fill="none" stroke="#003a44" stroke-width="2"/>
+    <circle cx="96" cy="101" r="8" fill="#3dff9a"><animate attributeName="r" values="8;11;8" dur="1.8s" repeatCount="indefinite"/></circle>
+    <text x="128" y="96" font-size="19" font-weight="700" fill="#00e5ff">SCROLL</text>
+    <text x="128" y="119" font-size="14" fill="#7cc4cf">Scroll</text>
+    <text x="352" y="106" font-size="16" fill="#7cc4cf">v</text>
+    <text x="60" y="170" font-size="15" fill="#e8f7fa" opacity=".9">always there, says what your hand is doing</text>
+
+    <!-- the open panel -->
+    <g clip-path="url(#c2)"><rect x="560" y="40" width="440" height="480" fill="#08121a" fill-opacity=".62"/></g>
+    <rect x="560.5" y="40.5" width="439" height="479" rx="22" fill="none" stroke="#1d6674"/>
+    <circle cx="590" cy="76" r="7" fill="#3dff9a"/>
+    <text x="610" y="82" font-size="22" font-weight="700" fill="#cfeff4">ZEHEN</text>
+    <text x="700" y="82" font-size="14" fill="#3dff9a">// tracking</text>
+    <g fill="#0b222c" stroke="#1d6674"><rect x="860" y="58" width="36" height="36" rx="18"/><rect x="902" y="58" width="36" height="36" rx="18"/><rect x="944" y="58" width="36" height="36" rx="18"/></g>
+    <g fill="#00e5ff" font-size="14" font-weight="700"><text x="870" y="82">||</text><text x="915" y="82">-</text><text x="957" y="82">x</text></g>
+    <rect x="580" y="108" width="400" height="106" rx="16" fill="#08121a" stroke="#1d6674"/>
+    <g stroke="#007a8a" stroke-width="2" fill="none" filter="url(#glow)" transform="translate(780 118) scale(.9)">
+      <path d="M-30 80 L-34 40 L-20 -6 M-12 80 L-14 30 L-8 -18 M6 80 L6 28 L12 -14 M24 80 L26 38 L36 4 M-40 52 L-62 30"/>
+    </g>
+    <g fill="#00e5ff"><circle cx="760" cy="126" r="3"/><circle cx="772" cy="190" r="3"/><circle cx="786" cy="132" r="3"/><circle cx="804" cy="188" r="3"/><circle cx="820" cy="140" r="3"/></g>
+
+    <rect x="580" y="226" width="400" height="62" rx="16" fill="#0a2e38" stroke="#00e5ff"/>
+    <circle cx="616" cy="257" r="18" fill="none" stroke="#003a44" stroke-width="2"/>
+    <circle cx="616" cy="257" r="8" fill="#00e5ff"/>
+    <text x="650" y="251" font-size="19" font-weight="700" fill="#00e5ff">Say "Zehen"</text>
+    <text x="650" y="274" font-size="13" fill="#7cc4cf">or point here and tap</text>
+
+    <text x="580" y="320" font-size="13" font-weight="700" fill="#7cc4cf">GESTURES</text>
+    <g font-size="16" fill="#cfeff4" font-family="'Segoe UI', Arial, sans-serif" font-weight="600">
+      <text x="590" y="350">Index finger up</text>
+      <text x="590" y="378">Pinch thumb + index</text>
+      <text x="590" y="406">Pinch twice quickly</text>
+    </g>
+    <rect x="574" y="416" width="412" height="52" rx="12" fill="#003a44" stroke="#00e5ff"/>
+    <text x="590" y="440" font-size="16" fill="#00e5ff" font-family="'Segoe UI', Arial, sans-serif" font-weight="700">Two fingers up</text>
+    <text x="590" y="458" font-size="13" fill="#9fdce6">Scroll up and down</text>
+    <g font-size="16" fill="#cfeff4" font-family="'Segoe UI', Arial, sans-serif" font-weight="600"><text x="590" y="494">Open palm, hold</text></g>
+  </g>
+</svg>
