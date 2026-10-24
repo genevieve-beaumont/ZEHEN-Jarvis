@@ -64,10 +64,6 @@ panel, then folds back on its own.
 </tr>
 </table>
 
-<div align="center">
-<img src="docs/media/ui.svg" alt="The ZEHEN pill and the full panel over a colourful desktop wallpaper" width="86%">
-</div>
-
 ## Install
 
 Windows 10 or 11, Python 3.10 or newer, a webcam and a microphone.
