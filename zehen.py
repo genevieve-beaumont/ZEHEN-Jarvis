@@ -444,6 +444,7 @@ ACTION is an object with exactly one key:
 {"search_web": "<query>"}  {"type": "<text to type>"}  {"press": "<key or combo like ctrl+t or win+d>"}
 {"window": "max"|"min"|"close"}  {"volume": "up"|"down"}  {"media": "playpause"|"nexttrack"|"prevtrack"}
 {"open_folder": "desktop"|"downloads"|"documents"|"pictures"|"music"|"videos"}
+{"tab": "<words from a browser tab's title>"}  {"switch": "<words from a window or tab title>"}  switch tabs and windows
 {"powershell": "<command>"}  runs hidden as the user and returns its output: use it for anything else on Windows
 (files, folders, settings, processes, network, installs).
 {"wait": "<seconds, max 5>"}  {"ui_list": ""} returns the names of what you can click in the window in front
@@ -456,7 +457,7 @@ PLEASANT = {"thank you", "thanks", "thank you so much", "thanks a lot", "ok", "o
             "perfect", "bye", "goodbye", "that's all", "no thanks", "fine", "alright", "got it", "hmm", "yes", "no",
             "yeah", "yep", "nope", "sure", "right", "oh", "wow", "hello", "hi", "hey"}
 ACTIONS = {"open_app", "focus_window", "open_url", "search_web", "type", "press", "window", "volume", "media",
-           "powershell", "wait", "ui_list", "click", "scroll", "mouse", "zoom", "open_folder"}
+           "powershell", "wait", "ui_list", "click", "scroll", "mouse", "zoom", "open_folder", "tab", "switch"}
 FOLDERS = {"desktop": "shell:Desktop", "downloads": "shell:Downloads", "documents": "shell:Personal",
            "pictures": "shell:My Pictures", "music": "shell:My Music", "videos": "shell:My Video"}
 MAX_STEPS = 6
@@ -666,6 +667,12 @@ def _quick_one(t, text, apps):
             f"-ArgumentList '-m','{tool}'; 'started' }} else {{ 'NOTFOUND' }} }}")}]
     if t in ("install jupyter", "install jupiter", "install jupyter notebook"):
         return "Installing Jupyter", [{"powershell": "python -m pip install notebook 2>&1 | Select-Object -Last 1"}]
+    if m := re.fullmatch(r"(?:switch|go|jump|change|move) (?:back )?to (?:the )?tab (\d)", t):
+        return "Tab " + m[1], [{"press": "ctrl+" + m[1]}]
+    if m := re.fullmatch(r"(?:(?:switch|go|jump|change|move)(?: back)? to|(?:open|show|select|find|focus))(?: the)? (.+?) tab", t):
+        return "Switching to the " + m[1] + " tab", [{"tab": m[1]}]
+    if m := re.fullmatch(r"(?:switch|jump|change|move|alt tab)(?: back)? to (?:the )?(.+?)(?: window| app)?", t):
+        return "Switching to " + m[1], [{"switch": m[1]}]
     if m := re.fullmatch(r"(?:open|show|go to)(?: me)?(?: my| the)? (desktop|downloads|documents|pictures|music|videos)(?: folder)?", t):
         return "Opening " + m[1], [{"open_folder": m[1]}]
     if m := re.fullmatch(r"(?:open|launch|start|run|go to|visit)(?: the)?(?: website| site)? (.+?)(?: website| site)?", t):
@@ -773,6 +780,61 @@ def ui_controls(limit=400):
     return out
 
 
+NUMWORDS = {"zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7",
+            "eight": "8", "nine": "9", "ten": "10"}
+
+
+def _toks(text):
+    """'SEM7_ML_PB_2026.pdf' -> ['sem', '7', 'ml', 'pb', '2026', 'pdf']; 'sam seven' -> ['sam', '7']."""
+    return [NUMWORDS.get(w, w) for w in re.findall(r"[a-z]+|\d+", fold(text))]
+
+
+def best_match(query, names, need=0.6):
+    """Index of the name that best matches what you said, or None. Forgiving of how speech writes things:
+    "sam seven tfpb" finds "SEM7_ML_PB_2026_TEST-2.pdf" (digits, spelling, word order)."""
+    q = _toks(query)
+    best, pick = need - 1e-9, None
+    for i, name in enumerate(names):
+        n = _toks(name)
+        hit = sum(any(w == x or (len(w) >= 3 and len(x) >= 3 and (w in x or x in w
+                      or difflib.SequenceMatcher(None, w, x).ratio() >= 0.66)) for x in n) for w in q)
+        score = hit / len(q) if q else 0
+        if score > best:
+            best, pick = score, i
+    return pick
+
+
+def ui_tabs(top=None):
+    """The tabs of the browser (or any tabbed app) in front: [(title, control)]."""
+    import uiautomation as auto
+    if top is None:
+        top = auto.GetForegroundControl()
+        top = top.GetTopLevelControl() if top else None
+    return [(c.Name.strip(), c) for c, _ in (auto.WalkControl(top, maxDepth=12) if top else [])
+            if c.ControlTypeName == "TabItemControl" and c.Name.strip() and not c.IsOffscreen]
+
+
+def switch_tab(query, top=None):
+    tabs = ui_tabs(top)
+    i = best_match(query, [n for n, _ in tabs])
+    if i is None:
+        seen = ", ".join(n[:25] for n, _ in tabs[:4])
+        return f"no tab like '{query}'." + (f" I can see: {seen}" if seen else " I don't see any tabs here.")
+    tabs[i][1].Click()
+    return "switched to " + re.sub(r" - (?:Memory usage|Audio playing|Camera|Microphone).*$", "", tabs[i][0])[:40]
+
+
+def switch_to(query):
+    """Windows first (apps), then the tabs of the window in front."""
+    wins = list_windows()
+    i = best_match(query, [t for _, t in wins])
+    if i is not None:
+        focus_window(wins[i][0])
+        return "switched to " + wins[i][1][:40]
+    out = switch_tab(query)
+    return out if out.startswith("switched") else f"no window or tab like '{query}'."
+
+
 def ui_list():
     return "\n".join(f"{k}: {n[:50]}" for k, n, _ in ui_controls(60)) or "(nothing clickable found)"
 
@@ -873,6 +935,7 @@ class Voice:
         self.level, self.floor, self.spoke = 0.0, 300.0, False  # mic loudness 0..1 for the HUD; room noise; did we talk
         self.ready, self.talk = threading.Event(), threading.Lock()  # greeting done; one voice at a time
         self.follow, self.chain, self.chain_on = False, 0, False  # keep listening only after a question of hers
+        self.partial, self.heard, self.heard_at = "", "", -99.0  # your words as you speak them, and the last request
         self.tpl, self.thr = self._load_templates()  # your own "Zehen", learned from three samples (see enroll)
         self.enroll_left, self.samples, self.enrolled_now = 0, [], False
         self.go = threading.Event()  # set by "listen now": skips the wake word
@@ -1100,8 +1163,17 @@ class Voice:
                 quiet += 1
             if rec.AcceptWaveform(block):
                 words += json.loads(rec.Result()).get("result", [])
-            elif json.loads(rec.PartialResult())["partial"]:
-                spoke = True
+                self.partial = " ".join(w["word"] for w in words)
+            else:
+                part = json.loads(rec.PartialResult())["partial"]
+                if part:
+                    spoke = True
+                    self.partial = (" ".join(w["word"] for w in words) + " " + part).strip()
+            if phrase and self.partial:  # the tail of "Zehen" shouldn't show up as your first word
+                toks = self.partial.split()
+                while len(toks) > 1 and toks[0] in {"the", "then", "this", "him", "he", "hen", "head", "hank", "like", "zane"}:
+                    toks.pop(0)
+                self.partial = " ".join(toks)
             if live and quiet >= 7 and (live_loud or phrase_cmd >= 2 or (cut is None and phrase_loud >= 8)
                                         or time.monotonic() - t0 > 2.5):
                 break  # a real pause after you stopped talking: that was the whole request
@@ -1119,6 +1191,7 @@ class Voice:
             cut = next((w["end"] for w in json.loads(g.FinalResult()).get("result", []) if w["word"] in self.words),
                        words[0]["start"] + 0.4)
         text = " ".join(w["word"] for w in words if w["start"] >= cut)
+        self.partial = ""
         if os.environ.get("ZEHEN_DEBUG"):
             print(f"[heard] cut {cut:.2f}s words {[(w['word'], round(w['start'], 2)) for w in words]}", flush=True)
         if phrase:  # the tail of "Zehen" can still decode as a word or two of its own ("the head", "like")
@@ -1134,6 +1207,7 @@ class Voice:
             text = rest if difflib.get_close_matches(first.strip(",.!?").lower(), ["zehen", "zen", "zane", "zayn",
                                                                                    "zain", "zahen"], 1, 0.6) else heard
         if len(text.strip()) > 1:
+            self.heard, self.heard_at = text.strip(), time.monotonic()  # stays on screen a few seconds, under the pill
             reply = self.on_text(text.strip())
             self.speak(reply)
             # she keeps listening only when she asked you a question, so a plain answer or "you're welcome" can't
@@ -1561,6 +1635,9 @@ class Tracker:
             self._say(quick[0])
             out = [o for o in (self._do(*next(iter(a.items()))) for a in quick[1]) if o]
             self.memory = (self.memory + [f"{text} => {quick[0]}"])[-5:]
+            lost = next((o for o in out if o.startswith(("no tab", "no window"))), "")
+            if lost:  # tell her what is there, so you can say it again properly
+                return lost.replace("no tab like", "I can't find a tab like").replace("no window or tab like", "I can't find")
             bad = next((o for o in out if o.startswith("no '")), "")
             if any("NOTFOUND" in o for o in out):
                 return "Jupyter isn't installed on this PC. Say: install Jupyter, and I'll add it."
@@ -1637,6 +1714,10 @@ class Tracker:
                 v, lambda: None)()
         elif kind == "zoom":
             ctrl_scroll(3 if v == "in" else -3)
+        elif kind == "tab":
+            return switch_tab(v)
+        elif kind == "switch":
+            return switch_to(v)
         elif kind == "open_folder" and v in FOLDERS:
             os.startfile(FOLDERS[v])
         elif kind == "wait":
@@ -1952,11 +2033,18 @@ class HUD:
         if s.flash:
             c.create_text(W / 2 + 2, px(40) + 2, text=s.flash, fill=DARK, font=self.font(28, True))
             c.create_text(W / 2, px(40), text=s.flash, fill=CYAN, font=self.font(28, True))
+        v, y = self.t.voice, self.pill_bottom + px(12)
+        you = (v.partial or (v.heard if now - v.heard_at < 8 else "")) if v else ""
+        if you:  # what you said, small and quiet, as you say it
+            for dx, dy, fg in ((1, 1, "#02060a"), (0, 0, SUB)):
+                c.create_text(W - px(18) + dx, y + dy, text="\u201c" + you + "\u201d", anchor="ne", justify="right",
+                              fill=fg, font=("Segoe UI", -px(11), "italic"), width=px(300))
+            y += px(20) * (1 + len(you) // 48)
         age = now - self.t.reply_at
         if self.t.reply and age < 7 and self.voice_mode(now) != "working":  # what she said: small, below the pill
             col = TEXT if age < 5.5 else SUB if age < 6.3 else DIM  # fades out
             for dx, dy, fg in ((1, 1, "#02060a"), (0, 0, col)):
-                c.create_text(W - px(18) + dx, self.pill_bottom + px(12) + dy, text=self.t.reply, anchor="ne",
+                c.create_text(W - px(18) + dx, y + dy, text=self.t.reply, anchor="ne",
                               justify="right", fill=fg, font=self.font(13), width=px(300))
 
     def draw_pointer(self, c, s, now):
@@ -2390,6 +2478,13 @@ def selftest():
     assert "NOTFOUND" in qc("open jupyter notebook")[1][0]["powershell"] and qc("jupiter notebook")[1] and qc("install jupyter")[1]
     quiet_t = Tracker(None, {}, start=False)
     assert quiet_t._agent("thank you") == "" and quiet_t._agent("okay") == ""  # pleasantries: silence, not a chat
+    names = ["SEM7_ML_PB_2026_TEST-2.pdf", "API Keys - GroqCloud", "(908) YouTube"]
+    assert [best_match(q, names) for q in ("SAM 7 TFPB", "sam seven", "youtube", "groq", "api keys", "banana")] == [
+        0, 0, 2, 1, 1, None], [best_match(q, names) for q in ("SAM 7 TFPB", "sam seven", "youtube", "groq", "banana")]
+    assert qc("switch to the SAM 7 TFPB tab")[1] == [{"tab": "sam 7 tfpb"}]
+    assert qc("go to youtube tab")[1] == [{"tab": "youtube"}] and qc("switch to tab 2")[1] == [{"press": "ctrl+2"}]
+    assert qc("switch to chrome")[1] == [{"switch": "chrome"}] and qc("new tab")[1] == [{"press": "ctrl+t"}]
+    assert qc("go to youtube")[1] == [{"open_url": "https://www.youtube.com"}]  # "go to" a site still opens the site
     assert qc("what time is it")[1] == [] and qc("what time is it")[0].startswith("It's ")
     assert qc("what is the weather") is None and qc("move my downloads to d drive") is None  # these need the AI
     say, acts, done = parse_plan('Sure!\n```json\n{"say": "Opening Spotify", "do": [{"open_app": "Spotify"}, {"rm": "x"}, '
