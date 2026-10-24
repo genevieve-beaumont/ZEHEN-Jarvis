@@ -437,7 +437,8 @@ ASK_SYSTEM = """You are NOOR, the voice assistant that runs this Windows PC for 
 Speak the way a warm, quick, dry-witted person does: natural sentences, contractions, no lists, no markdown, no emoji.
 Do the job first, then (only sometimes, and only if it is natural) add a short light remark. Never use "sir" or "madam".
 Reply with ONE JSON object and nothing else:
-{"say": "<what you say out loud: a short confirmation, or a real answer of 1 to 3 sentences when asked a question or chatted to>", "do": [ACTION, ...], "done": true}
+{"say": "<what you say out loud: a 2 to 6 word confirmation, or a real answer of 1 or 2 sentences when asked a question>", "do": [ACTION, ...], "done": true}
+Never add filler like "let me know if you need anything else". Ask a question back only when you truly need the answer.
 ACTION is an object with exactly one key:
 {"open_app": "<app name>"}  {"focus_window": "<part of an open window's title>"}  {"open_url": "https://..."}
 {"search_web": "<query>"}  {"type": "<text to type>"}  {"press": "<key or combo like ctrl+t or win+d>"}
@@ -451,6 +452,9 @@ ACTION is an object with exactly one key:
 To work inside an app: open_app, wait, ui_list, click, type, press enter.
 Set "done": false when you must read an output (powershell, ui_list) before the next step. At most 5 actions per step.
 Chat, questions, advice, jokes and facts: answer in "say" and leave "do" empty. Act, don't ask permission."""
+PLEASANT = {"thank you", "thanks", "thank you so much", "thanks a lot", "ok", "okay", "cool", "nice", "great", "good", "awesome",
+            "perfect", "bye", "goodbye", "that's all", "no thanks", "fine", "alright", "got it", "hmm", "yes", "no",
+            "yeah", "yep", "nope", "sure", "right", "oh", "wow", "hello", "hi", "hey"}
 ACTIONS = {"open_app", "focus_window", "open_url", "search_web", "type", "press", "window", "volume", "media",
            "powershell", "wait", "ui_list", "click", "scroll", "mouse", "zoom", "open_folder"}
 FOLDERS = {"desktop": "shell:Desktop", "downloads": "shell:Downloads", "documents": "shell:Personal",
@@ -868,7 +872,7 @@ class Voice:
         self.state, self.error, self.muted = "loading", "", False  # loading|idle|listening|thinking|speaking|off
         self.level, self.floor, self.spoke = 0.0, 300.0, False  # mic loudness 0..1 for the HUD; room noise; did we talk
         self.ready, self.talk = threading.Event(), threading.Lock()  # greeting done; one voice at a time
-        self.follow = False  # after she answers, keep listening a few seconds: no need to say "Zehen" again
+        self.follow, self.chain, self.chain_on = False, 0, False  # keep listening only after a question of hers
         self.tpl, self.thr = self._load_templates()  # your own "Zehen", learned from three samples (see enroll)
         self.enroll_left, self.samples, self.enrolled_now = 0, [], False
         self.go = threading.Event()  # set by "listen now": skips the wake word
@@ -924,6 +928,14 @@ class Voice:
 
     def listen_now(self):
         self.go.set()
+
+    def shush(self):
+        """"Stop" / "be quiet": cut her off mid-sentence."""
+        try:
+            import sounddevice as sd
+            sd.stop()
+        except Exception:
+            pass
 
     def say(self, text):
         """Speak without blocking the caller (the tutorial's voice)."""
@@ -1019,13 +1031,18 @@ class Voice:
                     stable = 0 if stable >= 0 else stable
                 if pushed or woke:
                     self.go.clear()
-                    self.spoke, self.follow = False, False
+                    self.spoke, self.follow, self.chain_on = False, False, bool(pushed and self.chain)
+                    if not pushed:
+                        self.chain = 0
                     self._command(model, q, b"" if pushed else pre, None if pushed else cut)
                     rec, hist, stable, onset, loud_n, checked = wake(), [], 0, None, 0, False
                     while self.spoke and not q.empty():
                         q.get_nowait()  # her own voice, echoing in the mic. Anything you said meanwhile is kept
                     if self.follow:
-                        self.go.set()  # conversation: listen again for a few seconds, no wake word needed
+                        time.sleep(0.5)  # let the room's echo of her own voice die away first
+                        while not q.empty():
+                            q.get_nowait()
+                        self.go.set()  # she asked a question: listen for the answer, no wake word needed
                     self.state = "idle"
 
     def _loud(self, block):
@@ -1119,7 +1136,11 @@ class Voice:
         if len(text.strip()) > 1:
             reply = self.on_text(text.strip())
             self.speak(reply)
-            self.follow = bool(reply) and self.chatty() and not self.cfg.get("no_follow_up")  # a chat answer invites a reply
+            # she keeps listening only when she asked you a question, so a plain answer or "you're welcome" can't
+            # start a conversation with the room; and only for a couple of turns
+            self.chain = self.chain + 1 if self.chain_on else 0
+            self.follow = (bool(reply) and self.chatty() and reply.rstrip().endswith("?") and self.chain < 3
+                           and not self.cfg.get("no_follow_up"))
         else:
             self.state = "idle"
 
@@ -1524,6 +1545,14 @@ class Tracker:
         if self.voice and re.search(r"\b(?:learn|train|teach|retrain|calibrate|recalibrate)\b.*\bvoice\b", fold(text)):
             self.voice.enroll()
             return "Say Zehen, three times, with a short pause between each."
+        t = " ".join(re.sub(r"[^\w\s']", " ", text.lower()).split())
+        if t in ("stop", "shut up", "be quiet", "quiet", "silence", "stop talking", "enough", "that's enough", "hush",
+                 "never mind", "nevermind", "cancel that", "cancel"):
+            if self.voice:
+                self.voice.shush()
+            return ""
+        if t in PLEASANT:  # "thanks", "okay", "cool": no reply, and certainly no chat
+            return ""
         quick = quick_command(text, self.apps)
         if quick and not quick[1]:  # a fact she knows for certain (the time): say it, no model to make one up
             self._say(quick[0])
@@ -1557,6 +1586,7 @@ class Tracker:
             say = str(e)
         except Exception as e:
             say = f"{type(e).__name__}: {e}"
+        say = " ".join(re.split(r"(?<=[.!?]) ", say)[:2])  # two sentences at most: she talks to be useful, not to talk
         say = re.sub(r"\s+", " ", re.sub(r"[^\w\s.,!?'\-:;()%/&+@#$]", "", say)).strip()  # no emoji or markdown to read aloud
         self.chatty = not acts and bool(say)
         self._say(say or "Done.")  # also clears any download bar
@@ -2358,6 +2388,8 @@ def selftest():
     assert qc("Type Hello World.")[1] == [{"type": "Hello World"}]
     assert qc("write a note saying buy milk in notepad") is None  # too much for a shortcut: the AI plans it
     assert "NOTFOUND" in qc("open jupyter notebook")[1][0]["powershell"] and qc("jupiter notebook")[1] and qc("install jupyter")[1]
+    quiet_t = Tracker(None, {}, start=False)
+    assert quiet_t._agent("thank you") == "" and quiet_t._agent("okay") == ""  # pleasantries: silence, not a chat
     assert qc("what time is it")[1] == [] and qc("what time is it")[0].startswith("It's ")
     assert qc("what is the weather") is None and qc("move my downloads to d drive") is None  # these need the AI
     say, acts, done = parse_plan('Sure!\n```json\n{"say": "Opening Spotify", "do": [{"open_app": "Spotify"}, {"rm": "x"}, '
