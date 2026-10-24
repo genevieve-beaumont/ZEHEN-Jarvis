@@ -424,6 +424,7 @@ GREETINGS = ["Good {part}. Noor online, running on electricity and mild sarcasm.
              "Good {part}. Noor reporting for duty. No coffee break required. Say Zehen.",
              "Online and unreasonably cheerful. I'm Noor. Say Zehen, and I'll make your computer behave.",
              "Good {part}. Noor here. Fully charged, vaguely overqualified. Say Zehen."]
+WAKE_SPELLINGS = ["zehen", "zen", "zane", "zayn", "zain", "zahen", "sehen", "zayan", "sen", "zayed", "zhen"]
 WAKE_STABLE = 5  # the wake word must be the phrase's first word for this many 0.1 s steps ("scroll" briefly sounds like it)
 WAKE_LIKE = {"zane", "zen", "zain", "zayn", "the", "then", "this", "he", "hes", "him", "head", "hen", "sane", "said",
              "saint", "zayed", "hey", "a", "is"}  # what Vosk's full vocabulary writes for "Zehen": the second opinion
@@ -439,6 +440,8 @@ KEY_PAGE = "https://console.groq.com/keys"
 ASK_SYSTEM = """You are NOOR, the voice assistant that runs this Windows PC for its owner, and you also just talk with them.
 Speak the way a warm, quick, dry-witted person does: natural sentences, contractions, no lists, no markdown, no emoji.
 Do the job first, then (only sometimes, and only if it is natural) add a short light remark. Never use "sir" or "madam".
+The request was transcribed from speech and may contain mishearings, wrong spellings or missing words: work out what
+the user most likely meant, using the installed apps and open windows. If it is truly unclear, ask one short question.
 Reply with ONE JSON object and nothing else:
 {"say": "<what you say out loud: a 2 to 6 word confirmation, or a real answer of 1 or 2 sentences when asked a question>", "do": [ACTION, ...], "done": true}
 Never add filler like "let me know if you need anything else". Ask a question back only when you truly need the answer.
@@ -526,6 +529,48 @@ def local_llm(note=lambda s, frac=None: None, load=True):
                        verbose=False)
         threading.Thread(target=_unload_when_idle, daemon=True).start()
     return _local
+
+
+_stt = None
+WHISPER_URL = "https://huggingface.co/Systran/faster-whisper-%s/resolve/main/"
+WHISPER_FILES = ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt")
+
+
+def stt_engine(cfg, note=lambda s, frac=None: None):
+    """Whisper through faster-whisper, int8 on the CPU: about 0.4 s for a spoken command, 145 MB, downloaded once.
+    It copes with accents, spells names properly and is told your app and window names, so "Jupyter" stays Jupyter."""
+    global _stt
+    if _stt is None:
+        name = cfg.get("stt_model", "base.en")  # tiny.en is quicker, small.en is sharper (480 MB)
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            if getattr(sys, "frozen", False):
+                raise RuntimeError("Speech recognition needs the Python install, not the .exe")
+            note("Installing speech recognition…")
+            if subprocess.run([sys.executable, "-m", "pip", "install", "faster-whisper"], capture_output=True,
+                              creationflags=0x08000000).returncode:
+                raise RuntimeError("Couldn't install speech recognition")
+            from faster_whisper import WhisperModel
+        folder = DATA / ("whisper-" + name)
+        folder.mkdir(parents=True, exist_ok=True)
+        for f in WHISPER_FILES:
+            if not (folder / f).exists():
+                fetch(WHISPER_URL % name + f, folder / f, progress=lambda d, n: note(
+                    f"Downloading hearing {d / 1e6:.0f}/{n / 1e6:.0f} MB", d / n if n else None))
+        _stt = WhisperModel(str(folder), device="cpu", compute_type="int8", cpu_threads=min(4, os.cpu_count() or 2))
+    return _stt
+
+
+def hear_local(cfg, pcm, hints=()):
+    """What was said, from 16 kHz int16 audio. Segments Whisper itself doubts are dropped."""
+    x = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768
+    if len(x) < 4800:
+        return ""
+    prompt = "Zehen, voice commands for a PC assistant. " + ", ".join(h for h in hints if h)[:600]  # it spells "Zehen"
+    segs, _ = stt_engine(cfg).transcribe(x, language="en", beam_size=3, temperature=0, initial_prompt=prompt,
+                                         condition_on_previous_text=False)
+    return " ".join(g.text.strip() for g in segs if g.no_speech_prob < 0.6 and g.avg_logprob > -1.3).strip()
 
 
 def tts_engine():
@@ -639,7 +684,8 @@ QUICK_WORDS = {"play": "playpause", "pause": "playpause", "resume": "playpause",
 
 
 QUICK_HEARD = {"scrawl": "scroll", "scrolling": "scroll", "scrolled": "scroll", "scrolls": "scroll", "clicks": "click",
-               "clicked": "click", "clique": "click", "klick": "click", "clic": "click", "quick": "click"}
+               "clicked": "click", "clique": "click", "klick": "click", "clic": "click", "quick": "click", "opened": "open",
+               "opening": "open", "opens": "open"}
 SPLIT_WORDS = [("you tube", "youtube"), ("g mail", "gmail"), ("face book", "facebook"), ("insta gram", "instagram"),
                ("git hub", "github"), ("chat gpt", "chatgpt"), ("net flix", "netflix"), ("link din", "linkedin"),
                ("what's app", "whatsapp"), ("whats app", "whatsapp"), ("note pad", "notepad")]
@@ -696,7 +742,7 @@ def _quick_one(t, text, apps):
     if t in ("what is the date", "what's the date", "whats the date", "what day is it", "what is today's date",
              "today's date", "what is the day today", "what's today", "what day is today"):
         return time.strftime("Today is %A, %B %d.").replace(" 0", " "), []
-    if m := re.fullmatch(r"(?:search|google|look up|search for|search google for|google search) (.+)", t):
+    if m := re.fullmatch(r"(?:search google for|search for|google search|look up|search|google) (.+)", t):
         return "Searching", [{"search_web": m[1]}]
     if m := re.fullmatch(r"(?:(?:open|start|launch|run) )?(?:jupiter|jupyter)(?: (notebook|lab))?", t):  # no Start menu entry: it's a command
         tool = "lab" if m[1] == "lab" else "notebook"
@@ -981,13 +1027,15 @@ class Voice:
     """Hands-free: say "Zehen" (wake word via Vosk, offline, always listening on this PC) -> your request (Whisper if you
     have a Groq key, else Vosk) -> on_text(text) returns what to say back. state drives the HUD."""
 
-    def __init__(self, cfg, on_text, paused, note=lambda s, frac=None: None, chatty=lambda: False):
+    def __init__(self, cfg, on_text, paused, note=lambda s, frac=None: None, chatty=lambda: False, hints=lambda: []):
         self.cfg, self.on_text, self.paused, self.note, self.chatty = cfg, on_text, paused, note, chatty
+        self.hints, self.alts = hints, []  # names to listen for; the other ear's version of the last request
         self.state, self.error, self.muted = "loading", "", False  # loading|idle|listening|thinking|speaking|off
         self.level, self.floor, self.spoke = 0.0, 300.0, False  # mic loudness 0..1 for the HUD; room noise; did we talk
         self.ready, self.talk = threading.Event(), threading.Lock()  # greeting done; one voice at a time
         self.follow, self.chain, self.chain_on = False, 0, False  # keep listening only after a question of hers
         self.partial, self.heard, self.heard_at = "", "", -99.0  # your words as you speak them, and the last request
+        self.wake_score = 0.0  # how close the last wake word was; a borderline one is double-checked by Whisper
         self.tpl, self.thr = self._load_templates()  # your own "Zehen", learned from three samples (see enroll)
         self.enroll_left, self.samples, self.enrolled_now = 0, [], False
         self.go = threading.Event()  # set by "listen now": skips the wake word
@@ -1024,7 +1072,7 @@ class Voice:
             self.say("That was too short. Let's try again. Say Zehen.")
             return
         intra = [dtw(tpl[i], tpl[j])[0] for i in range(3) for j in range(3) if i != j]
-        self.tpl, self.thr = tpl, min(max(intra) * 2.3, 17.0)  # you score 1.2 to 2 times the spread, other words 2.6 times and up
+        self.tpl, self.thr = tpl, min(max(intra) * 2.6, 19.0)  # you score 1.2 to 2 times the spread, other words 2.6 times and up; Whisper settles the edge
         DATA.mkdir(exist_ok=True)
         np.savez(DATA / "wake.npz", thr=self.thr, **{f"t{i}": t for i, t in enumerate(tpl)})
         self.enrolled_now = True
@@ -1037,6 +1085,7 @@ class Voice:
         if f is None:
             return False, None
         score, end = min(dtw(t, f) for t in self.tpl)
+        self.wake_score = score
         if os.environ.get("ZEHEN_DEBUG"):
             print(f"[wake] score {score:.1f} / limit {self.thr:.1f} -> {'WAKE' if score < self.thr else 'no'}", flush=True)
         return score < self.thr, a * 0.1 + end * 0.01
@@ -1055,6 +1104,13 @@ class Voice:
     def say(self, text):
         """Speak without blocking the caller (the tutorial's voice)."""
         threading.Thread(target=self.speak, args=(text,), daemon=True).start()
+
+    def _warm_ears(self):
+        try:
+            stt_engine(self.cfg, self.note)
+            self.note("")
+        except Exception:
+            pass  # the small model still hears; she tries again next launch
 
     def _warm_voice(self):
         try:
@@ -1098,6 +1154,7 @@ class Voice:
             fetch(VOSK_URL, VOSK_DIR, unzip=True)
         model = vosk.Model(str(VOSK_DIR))
         threading.Thread(target=self._warm_voice, daemon=True).start()  # her first words shouldn't wait on a download
+        threading.Thread(target=self._warm_ears, daemon=True).start()
         q = queue.Queue()
         wake = lambda: vosk.KaldiRecognizer(model, 16000, json.dumps(self.words + ["[unk]"]))
         rec, quiet, hist, stable = wake(), 0, [], 0  # hist: this phrase's audio so far
@@ -1149,7 +1206,8 @@ class Voice:
                     self.spoke, self.follow, self.chain_on = False, False, bool(pushed and self.chain)
                     if not pushed:
                         self.chain = 0
-                    self._command(model, q, b"" if pushed else pre, None if pushed else cut)
+                    self._command(model, q, b"" if pushed else pre, None if pushed else cut,
+                                  confirm=bool(self.tpl) and self.wake_score >= 0.9 * self.thr)
                     rec, hist, stable, onset, loud_n, checked = wake(), [], 0, None, 0, False
                     while self.spoke and not q.empty():
                         q.get_nowait()  # her own voice, echoing in the mic. Anything you said meanwhile is kept
@@ -1184,7 +1242,7 @@ class Voice:
         first = json.loads(r.FinalResult())["text"].split(" ")[0]
         return first in WAKE_LIKE
 
-    def _command(self, model, q, phrase=b"", cut=None):
+    def _command(self, model, q, phrase=b"", cut=None, confirm=False):
         """Hear the request. phrase = the audio so far, wake word included: it's transcribed again from the start
         and everything up to the end of the wake word is cut by its timestamps, so nothing is lost or left over."""
         import queue
@@ -1253,11 +1311,28 @@ class Voice:
                     toks.pop(0)
             text = " ".join(toks)
         self.state = "thinking"
-        heard = whisper(self.cfg, pcm)  # Whisper transcribes the whole clip, so it still starts with the wake word
+        # the best ear available: Groq's Whisper (with a Groq key), else Whisper on this PC, else the small model's guess
+        heard, small = whisper(self.cfg, pcm), text
+        if not heard:
+            try:
+                heard = hear_local(self.cfg, pcm, self.hints())  # the whole phrase, wake word included
+            except Exception:
+                heard = ""
+        if os.environ.get("ZEHEN_DEBUG"):
+            print(f"[ear] whisper {heard!r} | vosk {small!r} | confirm {confirm}", flush=True)
         if heard:
-            first, _, rest = heard.partition(" ")
-            text = rest if difflib.get_close_matches(first.strip(",.!?").lower(), ["zehen", "zen", "zane", "zayn",
-                                                                                   "zain", "zahen"], 1, 0.6) else heard
+            heard = re.sub(r"^(?:zehen|zehn|zahen|sehen)[\s,.:!-]*", "", heard, flags=re.I) or heard  # fused: "Zehenclick"
+            first = heard.split(" ")[0]
+            wakeish = bool(difflib.get_close_matches(first.strip(",.!?").lower(), WAKE_SPELLINGS, 1, 0.6))
+            if phrase and confirm and not wakeish:  # a borderline wake that Whisper didn't hear as "Zehen": a false alarm
+                self.state = "idle"
+                return
+            for _ in range(2):  # drop a leading "Zehen" however it was written
+                first, _, rest = heard.partition(" ")
+                if rest and difflib.get_close_matches(first.strip(",.!?").lower(), WAKE_SPELLINGS, 1, 0.6):
+                    heard = rest.lstrip(" ,.")
+            text = heard
+        self.alts = [small] if small and small.lower().strip(" .") != text.lower().strip(" .") else []
         if len(text.strip()) > 1:
             self.heard, self.heard_at = text.strip(), time.monotonic()  # stays on screen a few seconds, under the pill
             reply = self.on_text(text.strip())
@@ -1347,7 +1422,7 @@ class Tracker:
         self._publish(0.0, [], None, None, 0.0, None, 0.0, False)
         self.memory, self.camera_on = [], cfg.get("camera_on", True)  # memory: the last few things you asked
         self.chatty = False  # the last request was a conversation (no actions): she keeps listening for your reply
-        self.voice = (Voice(cfg, self._agent, lambda: self.paused, self._say, lambda: self.chatty)
+        self.voice = (Voice(cfg, self._agent, lambda: self.paused, self._say, lambda: self.chatty, self._hints)
                       if start and cfg.get("voice", True) else None)
         if start:
             if self.voice and sys.platform == "win32":
@@ -1657,6 +1732,11 @@ class Tracker:
         else:
             self._type(" ")
 
+    def _hints(self):
+        """Words worth listening for: your apps, the sites she knows, the windows open right now."""
+        return [n for n, _ in self.apps[:40]] + [k.title() for k in list(SITES)[:12]] + [
+            t[:30] for _, t in list_windows()[:5]]
+
     def _say(self, text, frac=None):
         self.reply, self.reply_at, self.dl = text, time.monotonic(), frac  # frac: download progress 0..1, else None
 
@@ -1688,7 +1768,14 @@ class Tracker:
             return ""
         if t in PLEASANT:  # "thanks", "okay", "cool": no reply, and certainly no chat
             return ""
-        quick = quick_command(text, self.apps)
+        alts = self.voice.alts if self.voice else []
+        for heard in [text, *alts]:  # the other ear may have caught it ("click" for "like"): try every version
+            quick = quick_command(heard, self.apps)
+            if quick:
+                text = heard
+                break
+        if not quick and len(text.split()) < 2:
+            return ""  # one stray word ("hand") is noise, not a request: she does not make something up
         if quick and not quick[1]:  # a fact she knows for certain (the time): say it, no model to make one up
             self._say(quick[0])
             return quick[0]
@@ -1707,7 +1794,9 @@ class Tracker:
         earlier = "".join(f"Earlier: {e}\n" for e in self.memory)  # so "now click the first one" makes sense
         msgs = [{"role": "system", "content": ASK_SYSTEM},
                 {"role": "user", "content": f"Installed apps: {', '.join(n for n, _ in self.apps[:80])}\n"
-                                            f"Open windows: {windows}\n{earlier}Request: {text}"}]
+                                            f"Open windows: {windows}\n{earlier}"
+                                            + (f"Another transcript of the same audio: {alts[0]}\n" if alts else "")
+                                            + f"Request (from speech recognition): {text}"}]
         self._say("")
         say, acts = "", []
         self.chatty = False
@@ -2683,6 +2772,7 @@ def selftest():
     assert qc("go to youtube tab")[1] == [{"tab": "youtube"}] and qc("switch to tab 2")[1] == [{"press": "ctrl+2"}]
     assert qc("switch to chrome")[1] == [{"switch": "chrome"}] and qc("new tab")[1] == [{"press": "ctrl+t"}]
     assert qc("go to youtube")[1] == [{"open_url": "https://www.youtube.com"}]  # "go to" a site still opens the site
+    assert qc("opened Jupyter Notebook")[1] and qc("search for flights to goa")[1] == [{"search_web": "flights to goa"}]
     assert qc("what time is it")[1] == [] and qc("what time is it")[0].startswith("It's ")
     assert qc("what is the weather") is None and qc("move my downloads to d drive") is None  # these need the AI
     say, acts, done = parse_plan('Sure!\n```json\n{"say": "Opening Spotify", "do": [{"open_app": "Spotify"}, {"rm": "x"}, '

@@ -25,6 +25,12 @@ All notable changes to ZEHEN. Format: [Keep a Changelog](https://keepachangelog.
 - Fluid glass pill: a live waveform follows your voice, replies appear as a small caption under it, panel size
   eases instead of snapping, and every panel button now responds to clicks
 - Funnier, still professional greetings
+- Hearing: Whisper on the PC transcribes what you say (accent-tolerant, knows your app and window names, 0.4 s),
+  with the wake-word model as a backup transcript; mishearings like "like" for "click" are recovered, one stray
+  word is ignored, and the language model is told the request came from speech
+- Bring your own AI key (Groq, Gemini, OpenRouter, OpenAI or any OpenAI-compatible service) with a verify step,
+  and a clean fall back to the offline brain when a key is missing, rejected or out of free requests
+- Switch tabs and windows by name ("switch to the SAM 7 TFPB tab"), live caption of what you said
 
 ### Changed
 - Side panel is now frosted glass (Windows acrylic blur) and starts as a small pill showing what your hand or voice is doing; point at it to open the full panel, which folds back on its own. The tutorial gains a voice step

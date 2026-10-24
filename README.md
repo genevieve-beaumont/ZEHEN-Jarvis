@@ -83,7 +83,8 @@ First run downloads a few models once into `%USERPROFILE%\.zehen`:
 | Model | Size | Used for | License |
 |---|---|---|---|
 | MediaPipe Hand Landmarker | 8 MB | Hand tracking | Apache-2.0 |
-| Vosk small English | 40 MB | Wake word and offline speech | Apache-2.0 |
+| Vosk small English | 40 MB | Wake word and a backup ear | Apache-2.0 |
+| Whisper base.en (faster-whisper) | 145 MB | Understanding what you say, on the PC | MIT |
 | Kokoro 82M (int8) | 120 MB | Noor's voice | Apache-2.0 |
 | Qwen3 1.7B (optional) | 1.1 GB | Offline brain when you have no key | Apache-2.0 |
 
@@ -122,7 +123,10 @@ Her name is Noor. She greets you when ZEHEN starts, then listens for one word.
 1. **Wake.** Her ear is on your PC. During the tutorial she learns how *you* say "Zehen" (three samples), so
    she wakes for your voice and accent and nothing else. The word only counts at the start of a phrase, so
    ordinary talk ("that is insane") never wakes her. Until she has learned it, a speech model's best guess is used.
-2. **Hear.** Your request is transcribed on the PC, or by Groq Whisper if you added a Groq key (more accurate).
+2. **Hear.** Your request is transcribed by Whisper running on the PC (about 0.4 s, any accent, and it is told your
+   app and window names so "Jupyter" stays Jupyter). With a Groq key, Groq's larger Whisper is used instead. A second
+   transcript from the wake-word model is kept as a backup, so "click" heard as "like" is still understood, and a
+   single stray word is treated as noise rather than a request.
 3. **Plan.** A language model returns a few actions as strict JSON. Anything outside the known action list is
    dropped.
 4. **Act.** Open apps, focus windows, open links, search the web, type in any language, press shortcuts,
@@ -207,6 +211,7 @@ at the top.
 | `no_follow_up` | `false` | Set to `true` so she doesn't keep listening after an answer |
 | `greeting` | `true` | Set to `false` to skip Noor's hello at start-up |
 | `wake` | `["zane"]` | Only used before she has learned your voice: spellings the speech model may write for "Zehen" |
+| `stt_model` | `"base.en"` | Hearing model: `tiny.en` is quicker, `small.en` (480 MB) is sharper |
 | `voice_name` | `"af_heart"` | Kokoro voice. Other female voices: `af_bella`, `af_nicole`, `af_sarah`, `af_sky`, `bf_emma` |
 | `llm` | none | `api_key` (set by Paste key, or env `ZEHEN_API_KEY`), optional `base_url` and `model` for any OpenAI-compatible service |
 

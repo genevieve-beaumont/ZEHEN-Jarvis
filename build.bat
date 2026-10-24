@@ -7,7 +7,7 @@ rem the offline brain's engine: prebuilt wheel, no compiler needed (skipped if u
 python -m pip install llama-cpp-python --only-binary=:all: --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 python -m PyInstaller --noconfirm --onefile --windowed --name ZEHEN --icon "%~dp0zehen.ico" ^
   --collect-all mediapipe --collect-all winrt --collect-all vosk --collect-all sounddevice ^
-  --collect-all kokoro_onnx --collect-all onnxruntime --collect-all espeakng_loader --collect-all phonemizer ^
+  --collect-all faster_whisper --collect-all ctranslate2 --collect-all kokoro_onnx --collect-all onnxruntime --collect-all espeakng_loader --collect-all phonemizer ^
   --collect-all uiautomation --collect-all comtypes --collect-all llama_cpp --exclude-module matplotlib ^
   --add-data "%~dp0hand_landmarker.task;." --add-data "%~dp0zehen.ico;." ^
   --distpath "%~dp0dist" --workpath "%WORK%" --specpath "%WORK%" "%~dp0zehen.py" || goto fail
