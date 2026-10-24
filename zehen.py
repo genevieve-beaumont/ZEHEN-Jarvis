@@ -653,6 +653,15 @@ def _quick_one(t, text, apps):
         return time.strftime("Today is %A, %B %d.").replace(" 0", " "), []
     if m := re.fullmatch(r"(?:search|google|look up|search for|search google for|google search) (.+)", t):
         return "Searching", [{"search_web": m[1]}]
+    if m := re.fullmatch(r"(?:(?:open|start|launch|run) )?(?:jupiter|jupyter)(?: (notebook|lab))?", t):  # no Start menu entry: it's a command
+        tool = "lab" if m[1] == "lab" else "notebook"
+        return "Starting Jupyter " + tool, [{"powershell": (
+            "$j = Get-Command jupyter -ErrorAction SilentlyContinue; "
+            f"if ($j) {{ Start-Process -FilePath $j.Source -ArgumentList '{tool}'; 'started' }} "
+            f"else {{ python -c 'import {tool}' 2>$null; if ($LASTEXITCODE -eq 0) {{ Start-Process python "
+            f"-ArgumentList '-m','{tool}'; 'started' }} else {{ 'NOTFOUND' }} }}")}]
+    if t in ("install jupyter", "install jupiter", "install jupyter notebook"):
+        return "Installing Jupyter", [{"powershell": "python -m pip install notebook 2>&1 | Select-Object -Last 1"}]
     if m := re.fullmatch(r"(?:open|show|go to)(?: me)?(?: my| the)? (desktop|downloads|documents|pictures|music|videos)(?: folder)?", t):
         return "Opening " + m[1], [{"open_folder": m[1]}]
     if m := re.fullmatch(r"(?:open|launch|start|run|go to|visit)(?: the)?(?: website| site)? (.+?)(?: website| site)?", t):
@@ -1524,6 +1533,8 @@ class Tracker:
             out = [o for o in (self._do(*next(iter(a.items()))) for a in quick[1]) if o]
             self.memory = (self.memory + [f"{text} => {quick[0]}"])[-5:]
             bad = next((o for o in out if o.startswith("no '")), "")
+            if any("NOTFOUND" in o for o in out):
+                return "Jupyter isn't installed on this PC. Say: install Jupyter, and I'll add it."
             return ("I can't find that here." if bad else "")
         windows = "; ".join(t[:40] for _, t in list_windows()[:10]) or "none"
         earlier = "".join(f"Earlier: {e}\n" for e in self.memory)  # so "now click the first one" makes sense
@@ -2346,6 +2357,7 @@ def selftest():
     assert qc("type cats and dogs")[1] == [{"type": "cats and dogs"}]  # "and" inside a request stays inside
     assert qc("Type Hello World.")[1] == [{"type": "Hello World"}]
     assert qc("write a note saying buy milk in notepad") is None  # too much for a shortcut: the AI plans it
+    assert "NOTFOUND" in qc("open jupyter notebook")[1][0]["powershell"] and qc("jupiter notebook")[1] and qc("install jupyter")[1]
     assert qc("what time is it")[1] == [] and qc("what time is it")[0].startswith("It's ")
     assert qc("what is the weather") is None and qc("move my downloads to d drive") is None  # these need the AI
     say, acts, done = parse_plan('Sure!\n```json\n{"say": "Opening Spotify", "do": [{"open_app": "Spotify"}, {"rm": "x"}, '
