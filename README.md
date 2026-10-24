@@ -12,7 +12,7 @@
 <img alt="Free and open source" src="https://img.shields.io/badge/cost-free%20forever-3dff9a?style=flat-square&labelColor=08121a">
 <img alt="Camera never leaves the PC" src="https://img.shields.io/badge/camera-never%20leaves%20the%20PC-3dff9a?style=flat-square&labelColor=08121a">
 
-[Website](https://priyanshusta.github.io/ZEHEN/) &nbsp;|&nbsp; [Install](#install) &nbsp;|&nbsp; [Gestures](#gestures) &nbsp;|&nbsp; [Voice](#voice-noor) &nbsp;|&nbsp; [How it works](#how-it-works) &nbsp;|&nbsp; [Privacy](#privacy-and-safety) &nbsp;|&nbsp; [FAQ](#faq) &nbsp;|&nbsp; [Roadmap](ROADMAP.md)
+[Website](https://priyanshusta.github.io/ZEHEN/) &nbsp;|&nbsp; [Install](#install) &nbsp;|&nbsp; [Gestures](#gestures) &nbsp;|&nbsp; [Voice](#voice) &nbsp;|&nbsp; [How it works](#how-it-works) &nbsp;|&nbsp; [Privacy](#privacy-and-safety) &nbsp;|&nbsp; [FAQ](#faq) &nbsp;|&nbsp; [Roadmap](ROADMAP.md)
 
 <br>
 
@@ -30,7 +30,7 @@ ZEHEN turns an ordinary webcam into a precision input device and an ordinary mic
 for your whole PC. It tracks 21 points on each hand, reads gestures in real time and drives Windows directly:
 cursor, clicks, scrolling, zoom, app switching, a launcher and handwriting typed from the air.
 
-Say **"Zehen"** and an assistant named **Noor** takes over: she opens apps, clicks and types inside them,
+Say **"Zehen"** and the voice assistant takes over: it opens apps, clicks and types inside them,
 runs PowerShell, searches the web, talks with you and answers out loud in a natural female voice. Everyday
 commands ("scroll down", "click", "open YouTube") run instantly with no AI at all. Your hands keep working
 while she does, and one button turns the camera off for voice-only use.
@@ -49,7 +49,7 @@ to write in the air. Smoothed and debounced to feel like a touchpad.
 
 **Voice**
 
-One wake word, then plain language. Noor plans the steps, does them, reads the result and keeps going until
+One wake word, then plain language. The assistant plans the steps, does them, reads the result and keeps going until
 the job is done. Offline wake word, offline voice, offline brain if you want one.
 
 </td>
@@ -75,11 +75,11 @@ cd ZEHEN
 ```
 
 `ZEHEN.bat` finds Python, installs the dependencies on first run and starts ZEHEN in the background. The
-first time, Noor introduces herself, sets up her own brain (a one-time download, shown with a progress bar) and
+first time, the assistant introduces itself, sets up its own brain (a one-time download, shown with a progress bar) and
 walks you through every gesture out loud, step by step, then learns your wake word. To quit, use the close button on the panel.
 
 The first run shows a **setup checklist** in the panel and fetches everything ZEHEN needs: Python packages, the
-hand model, the wake-word ear, Noor's voice, the hearing model and the offline brain. Anything already on the PC
+hand model, the wake-word ear, the voice, the hearing model and the offline brain. Anything already on the PC
 is skipped ("ready"), anything missing is downloaded with a progress bar, and a failure is shown and retried on
 the next launch. Run `python zehen.py --setup` to do the same from a terminal, or say "run setup". Models go to
 `%USERPROFILE%\.zehen`:
@@ -89,7 +89,7 @@ the next launch. Run `python zehen.py --setup` to do the same from a terminal, o
 | MediaPipe Hand Landmarker | 8 MB | Hand tracking | Apache-2.0 |
 | Vosk small English | 40 MB | Wake word and a backup ear | Apache-2.0 |
 | Whisper base.en (faster-whisper) | 145 MB | Understanding what you say, on the PC | MIT |
-| Kokoro 82M (int8) | 120 MB | Noor's voice | Apache-2.0 |
+| Kokoro 82M (int8) | 120 MB | The assistant's voice | Apache-2.0 |
 | Qwen3 1.7B (optional) | 1.1 GB | Offline brain when you have no key | Apache-2.0 |
 
 ## Gestures
@@ -110,9 +110,9 @@ the next launch. Run `python zehen.py --setup` to do the same from a terminal, o
 The right hand drives the cursor and the left issues commands. Either hand works alone. Touching the real
 mouse or touchpad hands control back instantly. Pointing at the pill for a moment opens the full panel.
 
-## Voice: Noor
+## Voice
 
-Her name is Noor. She greets you when ZEHEN starts, then listens for one word.
+The assistant greets you when ZEHEN starts, then listens for one word.
 
 ```text
 "Zehen, open Spotify."
@@ -177,7 +177,7 @@ pictures or unlabeled icons, and apps that expose no accessibility information c
 service works through the `llm` setting.
 
 > **There is no confirmation step.** PowerShell runs as you, so a wrong or manipulated answer can delete files or
-> send things. Pausing (fist, or the pause button) stops Noor between steps, and `"voice": false` turns the
+> send things. Pausing (fist, or the pause button) stops the assistant between steps, and `"voice": false` turns the
 > microphone off entirely.
 
 ## How it works
@@ -220,10 +220,10 @@ at the top.
 | `tutorial_done` | `false` | Set to `false` to see the tutorial again |
 | `voice` | `true` | Set to `false` to turn off the microphone and voice control |
 | `camera_on` | `true` | `false` is voice-only mode (set by the CAM button or "turn off the camera") |
-| `tutorial_voice` | `true` | Set to `false` to stop Noor narrating the tutorial |
+| `tutorial_voice` | `true` | Set to `false` to stop the assistant narrating the tutorial |
 | `brain_setup` | `true` | Set to `false` to skip downloading the offline brain on first run |
 | `no_follow_up` | `false` | Set to `true` so she doesn't keep listening after an answer |
-| `greeting` | `true` | Set to `false` to skip Noor's hello at start-up |
+| `greeting` | `true` | Set to `false` to skip the hello at start-up |
 | `wake` | `["zane"]` | Only used before she has learned your voice: spellings the speech model may write for "Zehen" |
 | `stt_model` | `"base.en"` | Hearing model: `tiny.en` is quicker, `small.en` (480 MB) is sharper |
 | `voice_name` | `"af_heart"` | Kokoro voice. Other female voices: `af_bella`, `af_nicole`, `af_sarah`, `af_sky`, `bf_emma` |
@@ -247,7 +247,7 @@ Details and how to report a problem are in [SECURITY.md](SECURITY.md).
 | | |
 |---|---|
 | OS | Windows 10 or 11 |
-| Memory | About 0.7 GB with the camera, hand tracking, voice recognition and Noor's voice loaded |
+| Memory | About 0.7 GB with the camera, hand tracking, voice recognition and the voice loaded |
 | Disk | About 0.3 GB, plus 1.1 GB if you use the offline brain |
 | CPU | Any modern laptop. Hand tracking runs at camera speed on CPU |
 | Network | Only for first-run downloads and, optionally, a free cloud key |
@@ -278,7 +278,7 @@ out loud. The wake word, speech engine and voice are open source and run offline
 <details>
 <summary><b>Does it work offline?</b></summary>
 <br>
-Hand tracking, handwriting, the wake word and Noor's voice are offline. Planning needs a brain: the offline
+Hand tracking, handwriting, the wake word and the voice are offline. Planning needs a brain: the offline
 Qwen3 model works with no internet after its one-time download.
 </details>
 
