@@ -1754,6 +1754,7 @@ class Tracker:
         fx, fy = OneEuro(), OneEuro()
         pfx, pfy = OneEuro(INK_MIN_CUTOFF, INK_BETA), OneEuro(INK_MIN_CUTOFF, INK_BETA)
         self.aspect = sw / sh
+        last_timestamp_ms = -1
         raw, count, gesture, since, fired = None, 0, None, 0.0, False
         lock_until, scroll_y0, main_label = 0.0, None, None
         m = lambda v: min(max((v - MARGIN) / (1 - 2 * MARGIN), 0.0), 1.0)
@@ -1786,7 +1787,9 @@ class Tracker:
                 if not ok:
                     raise RuntimeError(CAMERA_HELP)
                 rgb = cv2.cvtColor(cv2.flip(frame, 1), cv2.COLOR_BGR2RGB)  # mirror: move right = cursor right
-                res = det.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), int(now * 1000))
+                timestamp_ms = max(int(now * 1000), last_timestamp_ms + 1)
+                last_timestamp_ms = timestamp_ms
+                res = det.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), timestamp_ms)
                 # MediaPipe labels handedness assuming a mirrored image, which we give it, so labels are real
                 main = self.cfg.get("main_hand", "Right")
                 hands = [] if self.paused else sorted(
